@@ -1,0 +1,125 @@
+"""
+Main RNA Structure Prediction Model (Option B)
+Integrates MSA Transformer + Structure Module
+"""
+import torch
+import torch.nn as nn
+from modules.embeddings import RNAEmbedding, MSAEmbedding
+from modules.msa_module import MSATransformer
+from modules.structure_module import StructureModule
+
+
+class RNAStructurePredictor(nn.Module):
+    """
+    Full RNA 3D structure prediction model
+    
+    Architecture:
+    1. Embed sequence and MSA
+    2. MSA Transformer (extract evolutionary patterns)
+    3. Structure Module (predict 3D coordinates)
+    """
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        
+        # Embeddings
+        self.seq_embed = RNAEmbedding(
+            vocab_size=config.vocab_size,
+            embed_dim=config.embed_dim,
+            max_len=config.max_seq_length
+        )
+        
+        self.msa_embed = MSAEmbedding(
+            vocab_size=config.vocab_size,
+            embed_dim=config.d_single,
+            max_len=config.max_seq_length
+        )
+        
+        # MSA Transformer
+        self.msa_transformer = MSATransformer(
+            d_msa=config.d_single,
+            d_pair=config.d_pair,
+            n_blocks=config.msa_depth,
+            n_heads=config.n_heads,
+            dropout=config.dropout
+        )
+        
+        # Structure prediction module
+        self.structure_module = StructureModule(
+            d_single=config.structure_hidden,
+            d_pair=config.d_pair,
+            n_iterations=config.structure_iterations,
+            n_heads=config.n_heads,
+            dropout=config.dropout
+        )
+        
+    def forward(self, seq_tokens, msa_tokens):
+        """
+        Args:
+            seq_tokens: (batch, seq_len) - target sequence tokens
+            msa_tokens: (batch, n_seqs, seq_len) - MSA tokens
+        Returns:
+            coords: (batch, seq_len, 3) - predicted C1' coordinates
+            all_coords: List of intermediate predictions
+        """
+        # Embed MSA (includes target sequence as first row)
+        msa_emb = self.msa_embed(msa_tokens)  # (batch, n_seqs, seq_len, d_single)
+        
+        # MSA Transformer: extract evolutionary patterns
+        single, pair = self.msa_transformer(msa_emb)
+        # single: (batch, seq_len, d_single)
+        # pair: (batch, seq_len, seq_len, d_pair)
+        
+        # Structure Module: predict 3D coordinates
+        coords, all_coords = self.structure_module(single, pair)
+        # coords: (batch, seq_len, 3)
+        
+        return coords, all_coords
+    
+    def predict(self, seq_tokens, msa_tokens, return_intermediates=False):
+        """Inference mode prediction"""
+        self.eval()
+        with torch.no_grad():
+            coords, all_coords = self.forward(seq_tokens, msa_tokens)
+        
+        if return_intermediates:
+            return coords, all_coords
+        return coords
+
+
+class EMAModel:
+    """Exponential Moving Average of model parameters for stable inference"""
+    
+    def __init__(self, model, decay=0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        # Initialize shadow parameters
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self, model):
+        """Update EMA parameters"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+    
+    def apply_shadow(self):
+        """Apply EMA parameters to model (for inference)"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        """Restore original parameters"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
