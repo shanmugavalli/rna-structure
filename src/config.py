@@ -29,7 +29,7 @@ class Config:
     max_msa_seqs = 16  # Reduced for Kaggle GPU memory safety
     
     # MSA Transformer
-    msa_depth = 4  # Reduced from 6 for faster training
+    msa_depth = 3  # Reduced for faster training (was 4)
     n_heads = 8
     d_single = 256  # Single representation dimension
     d_pair = 128    # Pair representation dimension
@@ -40,13 +40,13 @@ class Config:
     structure_iterations = 2  # Reduced from 3 for faster training
     
     # ============ Training ============
-    batch_size = 1  # Low memory default; use grad accumulation for effective batch
+    batch_size = 2  # Try 2 (was 1); if OOM, revert to 1
     learning_rate = 1e-4
     weight_decay = 0.01
-    epochs = 40  # Reduced from 80 for 8-hour training (~12 min/epoch × 40 = 8 hours)
-    warmup_steps = 500  # Reduced proportionally with epochs
+    epochs = 12  # Reduced from 40 for ~6-8 hour training (50min × 12 = 10 hours)
+    warmup_steps = 200  # Reduced proportionally with epochs (was 500)
     grad_clip = 1.0
-    grad_accum_steps = 8
+    grad_accum_steps = 4  # Reduced from 8 since batch_size doubled
     use_amp = True
     
     # Loss weights (will be adjusted by curriculum)
