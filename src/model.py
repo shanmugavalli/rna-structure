@@ -42,7 +42,8 @@ class RNAStructurePredictor(nn.Module):
             d_pair=config.d_pair,
             n_blocks=config.msa_depth,
             n_heads=config.n_heads,
-            dropout=config.dropout
+            dropout=config.dropout,
+            use_checkpoint=config.use_gradient_checkpointing
         )
         
         # Structure prediction module
@@ -51,7 +52,8 @@ class RNAStructurePredictor(nn.Module):
             d_pair=config.d_pair,
             n_iterations=config.structure_iterations,
             n_heads=config.n_heads,
-            dropout=config.dropout
+            dropout=config.dropout,
+            use_checkpoint=config.use_gradient_checkpointing
         )
         
     def forward(self, seq_tokens, msa_tokens):

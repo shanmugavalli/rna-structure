@@ -5,6 +5,7 @@ Uses geometric-aware attention without full IPA implementation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 
 
@@ -136,9 +137,10 @@ class StructureModule(nn.Module):
     Simplified version for Option B (no full IPA)
     """
     
-    def __init__(self, d_single=384, d_pair=128, n_iterations=3, n_heads=8, dropout=0.1):
+    def __init__(self, d_single=384, d_pair=128, n_iterations=3, n_heads=8, dropout=0.1, use_checkpoint=False):
         super().__init__()
         self.n_iterations = n_iterations
+        self.use_checkpoint = use_checkpoint
         
         # Project to structure module hidden dimension
         self.input_proj = nn.Linear(256, d_single)  # From MSA output to structure dim
@@ -173,9 +175,12 @@ class StructureModule(nn.Module):
         
         all_coords = [coords]
         
-        # Iterative refinement
+        # Iterative refinement with optional checkpointing
         for block in self.update_blocks:
-            single, coords = block(single, pair, coords)
+            if self.use_checkpoint and self.training:
+                single, coords = checkpoint(block, single, pair, coords, use_reentrant=False)
+            else:
+                single, coords = block(single, pair, coords)
             all_coords.append(coords)
         
         return coords, all_coords

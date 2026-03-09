@@ -26,10 +26,10 @@ class Config:
     vocab_size = 5  # A, C, G, U, + padding token
     embed_dim = 256
     max_seq_length = 384
-    max_msa_seqs = 16  # Reduced for Kaggle GPU memory safety
+    max_msa_seqs = 8  # Further reduced to avoid OOM (was 16)
     
     # MSA Transformer
-    msa_depth = 3  # Reduced for faster training (was 4)
+    msa_depth = 2  # Reduced to 2 to save memory (was 3)
     n_heads = 8
     d_single = 256  # Single representation dimension
     d_pair = 128    # Pair representation dimension
@@ -40,14 +40,15 @@ class Config:
     structure_iterations = 2  # Reduced from 3 for faster training
     
     # ============ Training ============
-    batch_size = 2  # Try 2 (was 1); if OOM, revert to 1
+    batch_size = 1  # Reduced to 1 to avoid OOM
     learning_rate = 1e-4
     weight_decay = 0.01
     epochs = 12  # Reduced from 40 for ~6-8 hour training (50min × 12 = 10 hours)
     warmup_steps = 200  # Reduced proportionally with epochs (was 500)
     grad_clip = 1.0
-    grad_accum_steps = 4  # Reduced from 8 since batch_size doubled
+    grad_accum_steps = 8  # Increased to maintain effective batch size
     use_amp = True
+    use_gradient_checkpointing = True  # Trade compute for memory
     
     # Loss weights (will be adjusted by curriculum)
     loss_weights = {

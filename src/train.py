@@ -99,6 +99,11 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         fape_losses.update(loss_dict['fape'].item())
         coord_losses.update(loss_dict['coord'].item())
         
+        # Free memory explicitly
+        del loss, loss_dict, pred_coords, all_coords
+        if (step + 1) % accum_steps == 0:
+            torch.cuda.empty_cache()
+        
         # Update progress bar
         if step % config.log_every_n_steps == 0:
             pbar.set_postfix({
@@ -138,6 +143,12 @@ def validate(model, val_loader, criterion, config):
         losses.update(loss.item())
         fape_losses.update(loss_dict['fape'].item())
         coord_losses.update(loss_dict['coord'].item())
+        
+        # Free memory
+        del loss, loss_dict, pred_coords, all_coords, seq_tokens, msa_tokens, true_coords
+    
+    # Clear cache after validation
+    torch.cuda.empty_cache()
     
     return {
         'val_loss': losses.avg,
@@ -148,8 +159,8 @@ def validate(model, val_loader, criterion, config):
 
 def main():
     """Main training loop"""
-    # Mitigate fragmentation-related CUDA OOM on Kaggle.
-    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+    # Mitigate fragmentation-related CUDA OOM - use newer PYTORCH_ALLOC_CONF
+    os.environ.setdefault('PYTORCH_ALLOC_CONF', 'expandable_segments:True')
     print("=" * 50)
     print("RNA 3D Structure Prediction - Option B Training")
     print("=" * 50)

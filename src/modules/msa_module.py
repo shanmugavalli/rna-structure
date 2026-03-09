@@ -5,6 +5,7 @@ Processes Multiple Sequence Alignments to extract evolutionary patterns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange, einsum
 
 
@@ -187,8 +188,9 @@ class MSATransformerBlock(nn.Module):
 class MSATransformer(nn.Module):
     """Full MSA Transformer (Evoformer-style)"""
     
-    def __init__(self, d_msa=256, d_pair=128, n_blocks=6, n_heads=8, dropout=0.1):
+    def __init__(self, d_msa=256, d_pair=128, n_blocks=6, n_heads=8, dropout=0.1, use_checkpoint=False):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
         
         # Stack of MSA transformer blocks
         self.blocks = nn.ModuleList([
@@ -223,9 +225,12 @@ class MSATransformer(nn.Module):
         
         msa = msa_emb
         
-        # Process through MSA transformer blocks
+        # Process through MSA transformer blocks with optional checkpointing
         for block in self.blocks:
-            msa, pair = block(msa, pair)
+            if self.use_checkpoint and self.training:
+                msa, pair = checkpoint(block, msa, pair, use_reentrant=False)
+            else:
+                msa, pair = block(msa, pair)
         
         # Pool MSA to single representation (mean over sequences)
         single = msa.mean(dim=1)  # (batch, seq_len, d_msa)
