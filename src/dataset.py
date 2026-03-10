@@ -91,8 +91,8 @@ class RNAStructureDataset(Dataset):
             max_msa_seqs: Maximum number of MSA sequences to use
             max_seq_len: Maximum sequence length
         """
-        self.seq_df = pd.read_csv(seq_csv_path)
-        self.label_df = pd.read_csv(label_csv_path) if label_csv_path else None
+        self.seq_df = pd.read_csv(seq_csv_path, low_memory=False)
+        self.label_df = pd.read_csv(label_csv_path, low_memory=False) if label_csv_path else None
         self.msa_dir = msa_dir
         self.max_msa_seqs = max_msa_seqs
         self.max_seq_len = max_seq_len
@@ -137,7 +137,7 @@ class RNAStructureDataset(Dataset):
         # Load labels if available (training/validation)
         if not self.is_test:
             try:
-                coords = self._load_coordinates(target_id, len(sequence))
+                coords, coord_mask = self._load_coordinates(target_id, len(sequence))
                 
                 # Validate coordinates
                 if torch.isnan(coords).any():
@@ -154,6 +154,7 @@ class RNAStructureDataset(Dataset):
                 coords = coords_batch.squeeze(0)
                 
                 item['coords'] = coords
+                item['coord_mask'] = coord_mask  # Store validity mask
             except ValueError as e:
                 # Skip this sample - too corrupted
                 print(f"[SKIP] {target_id}: {str(e)}")
@@ -209,8 +210,9 @@ class RNAStructureDataset(Dataset):
             # No labels found - return zeros (shouldn't happen in training)
             return torch.zeros(seq_len, 3)
         
-        # Extract first structure (x_1, y_1, z_1)
+        # Extract first structure (x_1, y_1, z_1) and create validity mask
         coords = []
+        coord_mask = []  # 1 = valid, 0 = corrupted/missing
         nan_count = 0
         for row_idx, (_, row) in enumerate(target_labels.iterrows()):
             try:
@@ -225,11 +227,15 @@ class RNAStructureDataset(Dataset):
                     x = 0.0 if not np.isfinite(x) else x
                     y = 0.0 if not np.isfinite(y) else y
                     z = 0.0 if not np.isfinite(z) else z
+                    coord_mask.append(0.0)  # Mark as invalid
+                else:
+                    coord_mask.append(1.0)  # Mark as valid
                 
                 coords.append([x, y, z])
             except (ValueError, TypeError) as e:
                 print(f"[WARN] {target_id} row {row_idx}: error parsing coords - {e}")
                 coords.append([0.0, 0.0, 0.0])
+                coord_mask.append(0.0)  # Mark as invalid
                 nan_count += 1
         
         # Log corruption level
@@ -239,19 +245,26 @@ class RNAStructureDataset(Dataset):
         if nan_count > 0:
             print(f"[WARN] {target_id}: {nan_count}/{total_positions} positions had NaN/Inf ({100*corruption_rate:.1f}%), replaced with 0")
             
-            # Skip samples with >20% corruption (too much garbage data)
-            if corruption_rate > 0.20:
-                print(f"[ERROR] {target_id}: Skipping - {100*corruption_rate:.1f}% corruption exceeds 20% threshold")
+            # Skip samples with >35% corruption (too much garbage data)
+            if corruption_rate > 0.35:
+                print(f"[ERROR] {target_id}: Skipping - {100*corruption_rate:.1f}% corruption exceeds 35% threshold")
                 raise ValueError(f"Sample {target_id} too corrupted ({100*corruption_rate:.1f}%)")
         
         coords = torch.tensor(coords, dtype=torch.float32)
+        coord_mask = torch.tensor(coord_mask, dtype=torch.float32)
         
         # Pad or truncate to seq_len
         if len(coords) < seq_len:
             padding = torch.zeros(seq_len - len(coords), 3)
             coords = torch.cat([coords, padding], dim=0)
+            # Pad mask with zeros (invalid positions)
+            mask_padding = torch.zeros(seq_len - len(coord_mask))
+            coord_mask = torch.cat([coord_mask, mask_padding], dim=0)
         elif len(coords) > seq_len:
             coords = coords[:seq_len]
+            coord_mask = coord_mask[:seq_len]
+        
+        return coords, coord_mask
         
         return coords
 
@@ -273,6 +286,7 @@ def collate_fn(batch):
     seq_tokens = []
     msa_tokens = []
     coords = []
+    coord_masks = []
     target_ids = []
     
     for item in batch:
@@ -297,6 +311,12 @@ def collate_fn(batch):
             if len(coord) < max_len:
                 coord = torch.cat([coord, torch.zeros(max_len - len(coord), 3)])
             coords.append(coord)
+            
+            # Pad coord_mask
+            coord_mask = item['coord_mask']
+            if len(coord_mask) < max_len:
+                coord_mask = torch.cat([coord_mask, torch.zeros(max_len - len(coord_mask))])
+            coord_masks.append(coord_mask)
         
         target_ids.append(item['target_id'])
     
@@ -308,6 +328,7 @@ def collate_fn(batch):
     
     if coords:
         batch_dict['coords'] = torch.stack(coords)
+        batch_dict['coord_mask'] = torch.stack(coord_masks)
     
     return batch_dict
 

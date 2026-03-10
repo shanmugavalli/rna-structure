@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
+def fape_loss(pred_coords, true_coords, coord_mask=None, clamp_distance=10.0, eps=1e-8):
     """
     Frame Aligned Point Error (FAPE)
     Rotation-invariant loss that measures local structure accuracy
@@ -15,6 +15,7 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     Args:
         pred_coords: (batch, seq_len, 3) - predicted coordinates
         true_coords: (batch, seq_len, 3) - true coordinates
+        coord_mask: (batch, seq_len) - 1 for valid positions, 0 for invalid (optional)
         clamp_distance: Maximum distance to prevent outlier gradients
     Returns:
         loss: scalar
@@ -48,8 +49,17 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     dist_error = torch.abs(pred_dist - true_dist)
     dist_error = torch.clamp(dist_error, max=clamp_distance)
     
-    # Average over all pairs
-    loss = dist_error.mean()
+    # Apply mask if provided (only compute loss on valid positions)
+    if coord_mask is not None:
+        # Create pairwise mask: both i and j must be valid
+        pairwise_mask = coord_mask.unsqueeze(2) * coord_mask.unsqueeze(1)  # (batch, L, L)
+        dist_error = dist_error * pairwise_mask
+        # Average only over valid pairs
+        valid_count = pairwise_mask.sum() + eps
+        loss = dist_error.sum() / valid_count
+    else:
+        # Average over all pairs
+        loss = dist_error.mean()
     
     # Ensure loss is finite
     if not torch.isfinite(loss):
@@ -59,18 +69,27 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     return loss
 
 
-def coordinate_loss(pred_coords, true_coords):
+def coordinate_loss(pred_coords, true_coords, coord_mask=None):
     """
     Simple coordinate MSE/L1 loss
     
     Args:
         pred_coords: (batch, seq_len, 3)
         true_coords: (batch, seq_len, 3)
+        coord_mask: (batch, seq_len) - 1 for valid positions, 0 for invalid (optional)
     Returns:
         loss: scalar
     """
-    # Smooth L1 loss (Huber loss)
-    loss = F.smooth_l1_loss(pred_coords, true_coords)
+    if coord_mask is not None:
+        # Apply mask: expand to match coordinate dimensions
+        mask_expanded = coord_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+        # Smooth L1 loss (Huber loss) with reduction='none'
+        loss_per_coord = F.smooth_l1_loss(pred_coords, true_coords, reduction='none')
+        # Apply mask and compute mean over valid positions
+        loss = (loss_per_coord * mask_expanded).sum() / (mask_expanded.sum() + 1e-8)
+    else:
+        # Smooth L1 loss (Huber loss)
+        loss = F.smooth_l1_loss(pred_coords, true_coords)
     return loss
 
 
@@ -194,12 +213,13 @@ class StructureLoss(nn.Module):
             }
         self.weights = weights
     
-    def forward(self, pred_coords, true_coords, all_coords=None):
+    def forward(self, pred_coords, true_coords, all_coords=None, coord_mask=None):
         """
         Args:
             pred_coords: (batch, seq_len, 3) - final prediction
             true_coords: (batch, seq_len, 3) - ground truth
             all_coords: List of intermediate predictions (for auxiliary losses)
+            coord_mask: (batch, seq_len) - 1 for valid positions, 0 for invalid (optional)
         Returns:
             total_loss: scalar
             loss_dict: Dictionary of individual loss components
@@ -207,8 +227,8 @@ class StructureLoss(nn.Module):
         losses = {}
         
         # Main losses on final prediction
-        losses['fape'] = fape_loss(pred_coords, true_coords)
-        losses['coord'] = coordinate_loss(pred_coords, true_coords)
+        losses['fape'] = fape_loss(pred_coords, true_coords, coord_mask=coord_mask)
+        losses['coord'] = coordinate_loss(pred_coords, true_coords, coord_mask=coord_mask)
         losses['bond'] = bond_distance_loss(pred_coords)
         losses['clash'] = clash_penalty(pred_coords)
         
@@ -216,7 +236,7 @@ class StructureLoss(nn.Module):
         if all_coords is not None and len(all_coords) > 1:
             aux_loss = 0.0
             for coords in all_coords[:-1]:  # Exclude final (already counted)
-                aux_loss += fape_loss(coords, true_coords) * 0.2
+                aux_loss += fape_loss(coords, true_coords, coord_mask=coord_mask) * 0.2
             losses['auxiliary'] = aux_loss / (len(all_coords) - 1)
             self.weights['auxiliary'] = 0.1
         

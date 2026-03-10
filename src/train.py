@@ -49,6 +49,9 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)
         true_coords = batch['coords'].to(config.device)
+        coord_mask = batch.get('coord_mask', None)
+        if coord_mask is not None:
+            coord_mask = coord_mask.to(config.device)
         
         # Validate inputs for NaN/Inf
         if torch.isnan(seq_tokens).any() or torch.isnan(msa_tokens).any() or torch.isnan(true_coords).any():
@@ -74,7 +77,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
             optimizer.zero_grad(set_to_none=True)
             continue
         
-        loss, loss_dict = criterion(pred_coords, true_coords, all_coords)
+        loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
         
         # Check loss is finite before backward
         if not torch.isfinite(loss):
@@ -151,12 +154,15 @@ def validate(model, val_loader, criterion, config):
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)
         true_coords = batch['coords'].to(config.device)
+        coord_mask = batch.get('coord_mask', None)
+        if coord_mask is not None:
+            coord_mask = coord_mask.to(config.device)
         
         # Forward pass
         pred_coords, all_coords = model(seq_tokens, msa_tokens)
         
         # Compute loss
-        loss, loss_dict = criterion(pred_coords, true_coords, all_coords)
+        loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
         
         # Update meters
         losses.update(loss.item())
