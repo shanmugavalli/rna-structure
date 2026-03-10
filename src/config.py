@@ -1,14 +1,14 @@
 """
 Configuration for RNA 3D Structure Prediction - Option B (Pragmatic Hybrid)
 
-⚡ 8-HOUR TRAINING CONFIGURATION ⚡
-This configuration is optimized to run safely on Kaggle P100 (16GB) with reduced OOM risk.
+⚡ KAGGLE TIME-LIMIT SAFE CONFIGURATION ⚡
+This configuration is optimized to finish reliably within a Kaggle GPU session.
 
 Key settings:
-- 40 epochs (with gradient accumulation)
-- 4 MSA transformer blocks
+- 8 epochs (with gradient accumulation)
+- 2 MSA transformer blocks
 - 2 structure iterations
-- 16 MSA sequences (reduced for memory safety)
+- 6 MSA sequences (reduced for speed/memory)
 - Batch size 1 with accumulation (effective batch larger)
 
 Expected performance: lower peak memory usage and stable training on Kaggle GPU.
@@ -25,8 +25,8 @@ class Config:
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
     embed_dim = 256
-    max_seq_length = 384
-    max_msa_seqs = 8  # Further reduced to avoid OOM (was 16)
+    max_seq_length = 320
+    max_msa_seqs = 6  # Reduced for Kaggle time budget
     
     # MSA Transformer
     msa_depth = 2  # Reduced to 2 to save memory (was 3)
@@ -43,8 +43,8 @@ class Config:
     batch_size = 1  # Reduced to 1 to avoid OOM
     learning_rate = 1e-4
     weight_decay = 0.01
-    epochs = 12  # Reduced from 40 for ~6-8 hour training (50min × 12 = 10 hours)
-    warmup_steps = 200  # Reduced proportionally with epochs (was 500)
+    epochs = 8  # Kaggle-safe default
+    warmup_steps = 120  # Reduced proportionally with epochs
     grad_clip = 1.0
     grad_accum_steps = 8  # Increased to maintain effective batch size
     use_amp = True
@@ -77,8 +77,9 @@ class Config:
     noise_std = 0.1
     
     # Validation
-    val_frequency = 1  # Validate every N epochs
+    val_frequency = 2  # Validate every 2 epochs to reduce wall-time
     save_top_k = 5  # Save top K checkpoints
+    max_train_minutes = 500  # Stop gracefully before Kaggle timeout (~9h cap)
     
     # ============ Ensemble ============
     n_predictions = 5

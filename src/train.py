@@ -4,6 +4,7 @@ Training script for RNA structure prediction
 import os
 import torch
 import torch.nn as nn
+import time
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 import numpy as np
@@ -169,6 +170,10 @@ def main():
     print(f"Learning rate: {cfg.learning_rate}")
     print(f"Epochs: {cfg.epochs}")
     print("=" * 50)
+    max_train_minutes = getattr(cfg, 'max_train_minutes', 0)
+    max_train_seconds = max(0, int(max_train_minutes * 60))
+    safety_buffer_seconds = 20 * 60  # Leave buffer before hard notebook timeout
+    train_start_time = time.time()
     
     # Create dataloaders
     print("Loading data...")
@@ -214,6 +219,26 @@ def main():
     history = {'train_loss': [], 'val_loss': [], 'val_fape': []}
     
     for epoch in range(1, cfg.epochs + 1):
+        if max_train_seconds > 0 and epoch > 1:
+            elapsed = time.time() - train_start_time
+            avg_epoch_seconds = elapsed / (epoch - 1)
+            projected_next_epoch_end = elapsed + avg_epoch_seconds
+            budget_limit = max_train_seconds - safety_buffer_seconds
+            if projected_next_epoch_end > budget_limit:
+                print("\n[WARN] Stopping early to stay within Kaggle runtime limit.")
+                print(f"[WARN] Elapsed: {elapsed/60:.1f} min | Budget: {max_train_seconds/60:.1f} min")
+                time_budget_ckpt = os.path.join(cfg.checkpoint_dir, "time_budget_stop.pt")
+                save_checkpoint(
+                    time_budget_ckpt,
+                    model=model.state_dict(),
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                    epoch=epoch - 1,
+                    val_loss=best_val_loss,
+                    ema_state=ema.shadow
+                )
+                break
+
         print(f"\n{'='*50}")
         print(f"Epoch {epoch}/{cfg.epochs}")
         print(f"{'='*50}")
@@ -239,24 +264,28 @@ def main():
             
             # Save checkpoint
             val_loss = val_metrics['val_loss']
-            checkpoint_path = os.path.join(
-                cfg.checkpoint_dir,
-                f"checkpoint_epoch_{epoch}_loss_{val_loss:.4f}.pt"
-            )
-            
-            save_checkpoint(
-                checkpoint_path,
-                model=model.state_dict(),
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                val_loss=val_loss,
-                ema_state=ema.shadow
-            )
+            if not np.isfinite(val_loss):
+                print("[WARN] Validation loss is non-finite; skipping checkpoint save for this epoch")
+            else:
+                checkpoint_path = os.path.join(
+                    cfg.checkpoint_dir,
+                    f"checkpoint_epoch_{epoch}_loss_{val_loss:.4f}.pt"
+                )
+
+                save_checkpoint(
+                    checkpoint_path,
+                    model=model.state_dict(),
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                    epoch=epoch,
+                    val_loss=val_loss,
+                    ema_state=ema.shadow
+                )
             
             # Track top-k checkpoints
-            best_checkpoints.append((val_loss, checkpoint_path))
-            best_checkpoints.sort(key=lambda x: x[0])
+            if np.isfinite(val_loss):
+                best_checkpoints.append((val_loss, checkpoint_path))
+                best_checkpoints.sort(key=lambda x: x[0])
             
             # Keep only top-k
             if len(best_checkpoints) > cfg.save_top_k:
@@ -272,8 +301,8 @@ def main():
                 save_checkpoint(
                     best_path,
                     model=model.state_dict(),
-                    optimizer=optimizer,
-                    scheduler=scheduler,
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
                     epoch=epoch,
                     val_loss=val_loss,
                     ema_state=ema.shadow
