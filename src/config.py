@@ -41,11 +41,11 @@ class Config:
     
     # ============ Training ============
     batch_size = 1  # Reduced to 1 to avoid OOM
-    learning_rate = 1e-4
+    learning_rate = 5e-5  # Reduced from 1e-4 for safer training (NaN prevention)
     weight_decay = 0.01
     epochs = 8  # Kaggle-safe default
     warmup_steps = 120  # Reduced proportionally with epochs
-    grad_clip = 1.0
+    grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
     grad_accum_steps = 8  # Increased to maintain effective batch size
     use_amp = True
     use_gradient_checkpointing = True  # Trade compute for memory

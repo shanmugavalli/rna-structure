@@ -71,25 +71,65 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         msa_tokens = batch['msa_tokens'].to(config.device)
         true_coords = batch['coords'].to(config.device)
         
+        # Validate inputs for NaN/Inf
+        if torch.isnan(seq_tokens).any() or torch.isnan(msa_tokens).any() or torch.isnan(true_coords).any():
+            print(f"[WARN] Batch {step}: input contains NaN, skipping")
+            continue
+        if torch.isinf(seq_tokens).any() or torch.isinf(msa_tokens).any() or torch.isinf(true_coords).any():
+            print(f"[WARN] Batch {step}: input contains Inf, skipping")
+            continue
+        
         # Apply augmentation to ground truth
         true_coords = apply_augmentation(true_coords, config)
         
         # Forward pass (mixed precision on CUDA)
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(config.use_amp and config.device == 'cuda')):
             pred_coords, all_coords = model(seq_tokens, msa_tokens)
+            
+            # Validate model outputs
+            if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
+                print(f"[WARN] Batch {step}: model output contains NaN/Inf, skipping")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+            
             loss, loss_dict = criterion(pred_coords, true_coords, all_coords)
+        
+        # Check loss is finite before backward
+        if not torch.isfinite(loss):
+            print(f"[WARN] Batch {step}: loss is non-finite ({loss.item()}), skipping")
+            optimizer.zero_grad(set_to_none=True)
+            continue
 
         # Gradient accumulation
         scaled_loss = loss / accum_steps
         scaler.scale(scaled_loss).backward()
 
         if (step + 1) % accum_steps == 0 or (step + 1) == len(train_loader):
+            # Unscale before clipping
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
+            
+            # Clip gradients before optimizer step
+            total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            
+            # Check for NaN gradients
+            has_nan_grad = False
+            for param in model.parameters():
+                if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                    has_nan_grad = True
+                    break
+            
+            if has_nan_grad:
+                print(f"[WARN] NaN/Inf gradients detected, skipping optimizer step")
+                optimizer.zero_grad(set_to_none=True)
+            else:
+                # Optimizer step
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Scheduler step (AFTER optimizer step - correct order)
+                scheduler.step()
+            
             optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
         
         # Update EMA
         if ema is not None:

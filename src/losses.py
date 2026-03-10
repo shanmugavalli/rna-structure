@@ -19,6 +19,14 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     Returns:
         loss: scalar
     """
+    # Validate inputs for NaN/Inf
+    if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
+        print("[WARN] FAPE: pred_coords contains NaN/Inf")
+        return torch.tensor(0.0, device=pred_coords.device, dtype=pred_coords.dtype)
+    if torch.isnan(true_coords).any() or torch.isinf(true_coords).any():
+        print("[WARN] FAPE: true_coords contains NaN/Inf")
+        return torch.tensor(0.0, device=pred_coords.device, dtype=pred_coords.dtype)
+    
     batch, seq_len, _ = pred_coords.shape
     
     # For each residue as anchor, compute local frame errors
@@ -28,9 +36,13 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     pred_diff = pred_coords.unsqueeze(2) - pred_coords.unsqueeze(1)  # (batch, L, L, 3)
     true_diff = true_coords.unsqueeze(2) - true_coords.unsqueeze(1)
     
-    # Distance differences
-    pred_dist = torch.norm(pred_diff, dim=-1)  # (batch, L, L)
-    true_dist = torch.norm(true_diff, dim=-1)
+    # Distance differences (with numerical stability)
+    pred_dist = torch.norm(pred_diff, dim=-1, p=2)  # (batch, L, L)
+    true_dist = torch.norm(true_diff, dim=-1, p=2)
+    
+    # Clamp distances to prevent numerical issues
+    pred_dist = torch.clamp(pred_dist, min=0.0, max=1000.0)
+    true_dist = torch.clamp(true_dist, min=0.0, max=1000.0)
     
     # Clamped L1 distance
     dist_error = torch.abs(pred_dist - true_dist)
@@ -38,6 +50,11 @@ def fape_loss(pred_coords, true_coords, clamp_distance=10.0, eps=1e-8):
     
     # Average over all pairs
     loss = dist_error.mean()
+    
+    # Ensure loss is finite
+    if not torch.isfinite(loss):
+        print("[WARN] FAPE loss is non-finite, returning 0")
+        return torch.tensor(0.0, device=pred_coords.device, dtype=pred_coords.dtype)
     
     return loss
 
@@ -94,13 +111,24 @@ def bond_distance_loss(coords, target_dist=6.0, tolerance=1.0):
     Returns:
         loss: scalar
     """
+    if torch.isnan(coords).any() or torch.isinf(coords).any():
+        print("[WARN] Bond loss: coords contains NaN/Inf")
+        return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
+    
     # Consecutive residue distances
     diff = coords[:, 1:, :] - coords[:, :-1, :]  # (batch, seq_len-1, 3)
-    dist = torch.norm(diff, dim=-1)  # (batch, seq_len-1)
+    dist = torch.norm(diff, dim=-1, p=2)  # (batch, seq_len-1)
+    
+    # Clamp to prevent numerical issues
+    dist = torch.clamp(dist, min=0.0, max=1000.0)
     
     # Penalize deviations outside tolerance
     error = F.relu(torch.abs(dist - target_dist) - tolerance)
     loss = error.mean()
+    
+    if not torch.isfinite(loss):
+        print("[WARN] Bond loss is non-finite, returning 0")
+        return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
     
     return loss
 
@@ -115,11 +143,18 @@ def clash_penalty(coords, min_dist=3.0):
     Returns:
         loss: scalar
     """
+    if torch.isnan(coords).any() or torch.isinf(coords).any():
+        print("[WARN] Clash penalty: coords contains NaN/Inf")
+        return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
+    
     batch, seq_len, _ = coords.shape
     
-    # Pairwise distances
+    # Pairwise distances (with numerical stability)
     diff = coords.unsqueeze(2) - coords.unsqueeze(1)  # (batch, L, L, 3)
-    dist = torch.norm(diff, dim=-1)  # (batch, L, L)
+    dist = torch.norm(diff, dim=-1, p=2)  # (batch, L, L)
+    
+    # Clamp to prevent numerical issues
+    dist = torch.clamp(dist, min=0.0, max=1000.0)
     
     # Create mask for non-consecutive residues (ignore i, i+1, i-1)
     mask = torch.ones_like(dist, dtype=torch.bool)
@@ -130,7 +165,16 @@ def clash_penalty(coords, min_dist=3.0):
     clash = F.relu(min_dist - dist)
     clash = clash * mask.float()
     
-    loss = clash.sum() / (mask.sum() + 1e-8)
+    mask_count = mask.sum().float()
+    if mask_count < 1.0:
+        print("[WARN] Clash: no valid position pairs, returning 0")
+        return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
+    
+    loss = clash.sum() / mask_count
+    
+    if not torch.isfinite(loss):
+        print("[WARN] Clash loss is non-finite, returning 0")
+        return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
     
     return loss
 
