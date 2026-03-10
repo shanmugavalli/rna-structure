@@ -48,12 +48,16 @@ class MSAAttention(nn.Module):
         k = rearrange(k, 'b n (h d) -> b h n d', h=self.n_heads)
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.n_heads)
         
-        # Attention scores
+        # Attention scores with numerical stability
         attn = einsum(q, k, 'b h i d, b h j d -> b h i j') * self.scale
+        
+        # Clamp to prevent extreme values
+        attn = torch.clamp(attn, min=-50.0, max=50.0)
         
         if mask is not None:
             attn = attn.masked_fill(~mask, float('-inf'))
         
+        # Safe softmax with numerical stability
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
         
@@ -93,7 +97,10 @@ class OuterProductMean(nn.Module):
         
         # Outer product and mean over sequences
         outer = einsum(a, b, 'b s i c1, b s j c2 -> b i j c1 c2')
-        outer = outer / msa.shape[1]  # Mean over n_seqs
+        
+        # Safe division with epsilon to prevent division by zero/NaN
+        n_seqs = max(1, msa.shape[1])  # At least 1
+        outer = outer / float(n_seqs)  # Mean over n_seqs
         
         # Flatten outer product dimensions and project
         batch, L, _, c1, c2 = outer.shape

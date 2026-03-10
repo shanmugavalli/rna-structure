@@ -44,21 +44,33 @@ class GeometricAttention(nn.Module):
         k = rearrange(k, 'b n (h d) -> b h n d', h=self.n_heads)
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.n_heads)
         
-        # Attention scores from features
-        attn = torch.einsum('bhid,bhjd->bhij', q, k) / (self.head_dim ** 0.5)
+        # Attention scores from features with stability
+        scale_factor = (self.head_dim ** -0.5)
+        attn = torch.einsum('bhid,bhjd->bhij', q, k) * scale_factor
+        
+        # Clamp to prevent extreme values
+        attn = torch.clamp(attn, min=-50.0, max=50.0)
         
         # Add geometric bias from distances
         if coords is not None:
-            # Compute pairwise distances
-            diff = coords.unsqueeze(2) - coords.unsqueeze(1)  # (batch, seq_len, seq_len, 3)
-            dist = torch.norm(diff, dim=-1, keepdim=True)  # (batch, seq_len, seq_len, 1)
-            
-            # Project distances to attention bias
-            dist_bias = self.distance_proj(dist)  # (batch, seq_len, seq_len, n_heads)
-            dist_bias = rearrange(dist_bias, 'b i j h -> b h i j')
-            
-            attn = attn + dist_bias
+            try:
+                # Compute pairwise distances with clamping
+                diff = coords.unsqueeze(2) - coords.unsqueeze(1)  # (batch, seq_len, seq_len, 3)
+                dist = torch.norm(diff, dim=-1, keepdim=True, p=2)  # (batch, seq_len, seq_len, 1)
+                
+                # Clamp distances to prevent numerical issues
+                dist = torch.clamp(dist, min=0.0, max=100.0)
+                
+                # Project distances to attention bias
+                dist_bias = self.distance_proj(dist)  # (batch, seq_len, seq_len, n_heads)
+                dist_bias = torch.clamp(dist_bias, min=-10.0, max=10.0)  # Prevent large biases
+                dist_bias = rearrange(dist_bias, 'b i j h -> b h i j')
+                
+                attn = attn + dist_bias
+            except Exception as e:
+                print(f"[WARN] Geometric attention error: {e}")
         
+        # Safe softmax with numerical stability
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
         

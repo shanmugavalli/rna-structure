@@ -47,7 +47,7 @@ class Config:
     warmup_steps = 120  # Reduced proportionally with epochs
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
     grad_accum_steps = 8  # Increased to maintain effective batch size
-    use_amp = True
+    use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
     use_gradient_checkpointing = True  # Trade compute for memory
     
     # Loss weights (will be adjusted by curriculum)

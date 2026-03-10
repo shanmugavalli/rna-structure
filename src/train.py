@@ -19,33 +19,7 @@ from losses import StructureLoss
 from utils import save_checkpoint, load_checkpoint, AverageMeter
 
 
-def apply_augmentation(coords, config):
-    """Apply data augmentation to coordinates"""
-    batch_size, seq_len, _ = coords.shape
-    
-    # Random rotation
-    if torch.rand(1).item() < config.augment_rotation:
-        # Random rotation matrix for each sample in batch
-        for i in range(batch_size):
-            angle = torch.rand(3) * 2 * np.pi
-            Rx = torch.tensor([[1, 0, 0],
-                              [0, torch.cos(angle[0]), -torch.sin(angle[0])],
-                              [0, torch.sin(angle[0]), torch.cos(angle[0])]])
-            Ry = torch.tensor([[torch.cos(angle[1]), 0, torch.sin(angle[1])],
-                              [0, 1, 0],
-                              [-torch.sin(angle[1]), 0, torch.cos(angle[1])]])
-            Rz = torch.tensor([[torch.cos(angle[2]), -torch.sin(angle[2]), 0],
-                              [torch.sin(angle[2]), torch.cos(angle[2]), 0],
-                              [0, 0, 1]])
-            R = Rz @ Ry @ Rx
-            coords[i] = coords[i] @ R.T.to(coords.device)
-    
-    # Gaussian noise
-    if torch.rand(1).item() < config.augment_noise:
-        noise = torch.randn_like(coords) * config.noise_std
-        coords = coords + noise
-    
-    return coords
+# Augmentation is now in dataset.py to be applied before batch collation
 
 
 def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, config, ema=None):
@@ -61,7 +35,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
     coord_losses = AverageMeter()
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    scaler = torch.amp.GradScaler('cuda', enabled=(config.use_amp and config.device == 'cuda'))
+    # Note: GradScaler removed - AMP disabled in config
     accum_steps = max(1, config.grad_accum_steps)
     optimizer.zero_grad(set_to_none=True)
     
@@ -79,20 +53,23 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
             print(f"[WARN] Batch {step}: input contains Inf, skipping")
             continue
         
-        # Apply augmentation to ground truth
-        true_coords = apply_augmentation(true_coords, config)
+        # Augmentation already applied in dataset pipeline
+        # Additional safeguard: verify augmented coords are still valid
+        if torch.isnan(true_coords).any() or torch.isinf(true_coords).any():
+            print(f"[WARN] Batch {step}: augmented coords contain NaN/Inf, skipping")
+            optimizer.zero_grad(set_to_none=True)
+            continue
         
-        # Forward pass (mixed precision on CUDA)
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(config.use_amp and config.device == 'cuda')):
-            pred_coords, all_coords = model(seq_tokens, msa_tokens)
-            
-            # Validate model outputs
-            if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
-                print(f"[WARN] Batch {step}: model output contains NaN/Inf, skipping")
-                optimizer.zero_grad(set_to_none=True)
-                continue
-            
-            loss, loss_dict = criterion(pred_coords, true_coords, all_coords)
+        # Forward pass (AMP disabled - using full float32)
+        pred_coords, all_coords = model(seq_tokens, msa_tokens)
+        
+        # Validate model outputs
+        if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
+            print(f"[WARN] Batch {step}: model output contains NaN/Inf, skipping")
+            optimizer.zero_grad(set_to_none=True)
+            continue
+        
+        loss, loss_dict = criterion(pred_coords, true_coords, all_coords)
         
         # Check loss is finite before backward
         if not torch.isfinite(loss):
@@ -100,14 +77,11 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
             optimizer.zero_grad(set_to_none=True)
             continue
 
-        # Gradient accumulation
+        # Gradient accumulation (float32, no scaler)
         scaled_loss = loss / accum_steps
-        scaler.scale(scaled_loss).backward()
+        scaled_loss.backward()
 
         if (step + 1) % accum_steps == 0 or (step + 1) == len(train_loader):
-            # Unscale before clipping
-            scaler.unscale_(optimizer)
-            
             # Clip gradients before optimizer step
             total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             
@@ -122,9 +96,8 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
                 print(f"[WARN] NaN/Inf gradients detected, skipping optimizer step")
                 optimizer.zero_grad(set_to_none=True)
             else:
-                # Optimizer step
-                scaler.step(optimizer)
-                scaler.update()
+                # Optimizer step (no scaler.step needed - standard PyTorch)
+                optimizer.step()
                 
                 # Scheduler step (AFTER optimizer step - correct order)
                 scheduler.step()
