@@ -40,6 +40,11 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
     optimizer.zero_grad(set_to_none=True)
     
     for step, batch in enumerate(pbar):
+        # Skip if batch is None (all samples were corrupted)
+        if batch is None:
+            print(f"[WARN] Batch {step}: all samples corrupted, skipping")
+            continue
+        
         # Move to device
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)

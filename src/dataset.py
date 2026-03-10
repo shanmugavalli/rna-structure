@@ -117,7 +117,7 @@ class RNAStructureDataset(Dataset):
         # Validate tokens
         if torch.isnan(seq_tokens.float()).any():
             print(f"[ERROR] Dataset idx {idx} ({target_id}): seq_tokens contains NaN")
-            raise ValueError(f"Corrupted sequence tokens for {target_id}")
+            return None
         
         # Load MSA if available
         msa_tokens = self._load_msa(target_id, len(sequence))
@@ -125,7 +125,7 @@ class RNAStructureDataset(Dataset):
         # Validate MSA
         if torch.isnan(msa_tokens.float()).any():
             print(f"[ERROR] Dataset idx {idx} ({target_id}): msa_tokens contains NaN")
-            raise ValueError(f"Corrupted MSA tokens for {target_id}")
+            return None
         
         item = {
             'target_id': target_id,
@@ -136,24 +136,28 @@ class RNAStructureDataset(Dataset):
         
         # Load labels if available (training/validation)
         if not self.is_test:
-            coords = self._load_coordinates(target_id, len(sequence))
-            
-            # Validate coordinates
-            if torch.isnan(coords).any():
-                print(f"[ERROR] Dataset idx {idx} ({target_id}): coords contains NaN")
-                print(f"[DEBUG] Coords shape: {coords.shape}, non-finite count: {(~torch.isfinite(coords)).sum().item()}")
-                raise ValueError(f"Corrupted coordinates for {target_id}")
-            
-            if torch.isinf(coords).any():
-                print(f"[ERROR] Dataset idx {idx} ({target_id}): coords contains Inf")
-                raise ValueError(f"Coordinates contain Inf for {target_id}")
-            
-            # Apply augmentation (add batch dimension for augmentation function)
-            coords_batch = coords.unsqueeze(0)  # (1, seq_len, 3)
-            coords_batch = apply_augmentation(coords_batch, self._get_config())
-            coords = coords_batch.squeeze(0)
-            
-            item['coords'] = coords
+            try:
+                coords = self._load_coordinates(target_id, len(sequence))
+                
+                # Validate coordinates
+                if torch.isnan(coords).any():
+                    print(f"[ERROR] Dataset idx {idx} ({target_id}): coords contains NaN")
+                    return None
+                
+                if torch.isinf(coords).any():
+                    print(f"[ERROR] Dataset idx {idx} ({target_id}): coords contains Inf")
+                    return None
+                
+                # Apply augmentation (add batch dimension for augmentation function)
+                coords_batch = coords.unsqueeze(0)  # (1, seq_len, 3)
+                coords_batch = apply_augmentation(coords_batch, self._get_config())
+                coords = coords_batch.squeeze(0)
+                
+                item['coords'] = coords
+            except ValueError as e:
+                # Skip this sample - too corrupted
+                print(f"[SKIP] {target_id}: {str(e)}")
+                return None
         
         return item
     
@@ -228,8 +232,17 @@ class RNAStructureDataset(Dataset):
                 coords.append([0.0, 0.0, 0.0])
                 nan_count += 1
         
+        # Log corruption level
+        total_positions = len(target_labels)
+        corruption_rate = nan_count / total_positions if total_positions > 0 else 0.0
+        
         if nan_count > 0:
-            print(f"[WARN] {target_id}: {nan_count}/{len(target_labels)} positions had NaN/Inf, replaced with 0")
+            print(f"[WARN] {target_id}: {nan_count}/{total_positions} positions had NaN/Inf ({100*corruption_rate:.1f}%), replaced with 0")
+            
+            # Skip samples with >20% corruption (too much garbage data)
+            if corruption_rate > 0.20:
+                print(f"[ERROR] {target_id}: Skipping - {100*corruption_rate:.1f}% corruption exceeds 20% threshold")
+                raise ValueError(f"Sample {target_id} too corrupted ({100*corruption_rate:.1f}%)")
         
         coords = torch.tensor(coords, dtype=torch.float32)
         
@@ -244,7 +257,15 @@ class RNAStructureDataset(Dataset):
 
 
 def collate_fn(batch):
-    """Custom collate function to handle variable-length sequences"""
+    """Custom collate function to handle variable-length sequences and skip corrupted samples"""
+    # Filter out None items (skipped corrupted samples)
+    batch = [item for item in batch if item is not None]
+    
+    if len(batch) == 0:
+        # All samples in batch were corrupted - return empty batch
+        print("[WARN] All samples in batch were corrupted, returning empty batch")
+        return None
+    
     # Find max sequence length in batch
     max_len = max(item['seq_len'] for item in batch)
     
