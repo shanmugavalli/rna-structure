@@ -10,7 +10,7 @@ from tqdm import tqdm
 from glob import glob
 
 from config import cfg
-from model import RNAStructurePredictor, EMAModel
+from model import build_model
 from dataset import RNAStructureDataset, collate_fn
 from torch.utils.data import DataLoader
 
@@ -51,7 +51,7 @@ def load_models(checkpoint_paths, config):
     models = []
     
     for path in checkpoint_paths:
-        model = RNAStructurePredictor(config).to(config.device)
+        model = build_model(config).to(config.device)
         checkpoint = torch.load(path, map_location=config.device)
         
         # Load model state
@@ -145,12 +145,28 @@ def run_inference(config, test_csv_path, output_path='outputs/predictions/predic
         target_id = batch['target_ids'][0]
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)
+        residue_features = batch.get('residue_features', None)
+        if residue_features is not None:
+            residue_features = residue_features.to(config.device)
         
         # Generate 5 predictions
-        predictions = predict_5_structures(models, seq_tokens, msa_tokens, config)
+        if getattr(config, 'model_variant', 'full') == 'cpu_lite':
+            lite_predictions = []
+            for model in models[:3]:
+                model.eval()
+                coords, _ = model(seq_tokens, msa_tokens, residue_features=residue_features)
+                lite_predictions.append(coords.cpu())
+            while len(lite_predictions) < 5:
+                lite_predictions.append(lite_predictions[0])
+            predictions = lite_predictions[:5]
+        else:
+            predictions = predict_5_structures(models, seq_tokens, msa_tokens, config)
         
-        # Store predictions (5 x seq_len x 3)
-        all_predictions[target_id] = torch.stack(predictions).numpy()
+        # Store predictions as (5, seq_len, 3) for submission formatter.
+        pred_tensor = torch.stack(predictions).detach().cpu()
+        if pred_tensor.ndim == 4 and pred_tensor.shape[1] == 1:
+            pred_tensor = pred_tensor.squeeze(1)
+        all_predictions[target_id] = pred_tensor.numpy()
     
     # Save predictions
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

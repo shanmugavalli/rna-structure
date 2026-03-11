@@ -9,6 +9,56 @@ from modules.msa_module import MSATransformer
 from modules.structure_module import StructureModule
 
 
+class RNALitePredictor(nn.Module):
+    """CPU-friendly sequence model for small/limited datasets."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.feature_dim = getattr(config, 'feature_dim', 9)
+        hidden_dim = getattr(config, 'lite_hidden_dim', 128)
+        embed_dim = getattr(config, 'lite_embed_dim', 64)
+
+        self.seq_embed = nn.Embedding(config.vocab_size, embed_dim, padding_idx=4)
+        self.feature_proj = nn.Linear(self.feature_dim, embed_dim)
+        self.encoder = nn.LSTM(
+            input_size=embed_dim * 2,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.0,
+        )
+        self.norm = nn.LayerNorm(hidden_dim * 2)
+        self.dropout = nn.Dropout(config.dropout)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 3),
+        )
+
+    def forward(self, seq_tokens, msa_tokens=None, residue_features=None):
+        if residue_features is None:
+            batch_size, seq_len = seq_tokens.shape
+            residue_features = torch.zeros(
+                batch_size,
+                seq_len,
+                self.feature_dim,
+                dtype=torch.float32,
+                device=seq_tokens.device,
+            )
+
+        seq_emb = self.seq_embed(seq_tokens)
+        feat_emb = self.feature_proj(residue_features)
+        x = torch.cat([seq_emb, feat_emb], dim=-1)
+
+        x, _ = self.encoder(x)
+        x = self.norm(x)
+        x = self.dropout(x)
+        coords = self.head(x)
+        return coords, [coords]
+
+
 class RNAStructurePredictor(nn.Module):
     """
     Full RNA 3D structure prediction model
@@ -88,6 +138,14 @@ class RNAStructurePredictor(nn.Module):
         if return_intermediates:
             return coords, all_coords
         return coords
+
+
+def build_model(config):
+    """Factory that selects a full or CPU-lite model variant."""
+    model_variant = getattr(config, 'model_variant', 'full')
+    if model_variant == 'cpu_lite':
+        return RNALitePredictor(config)
+    return RNAStructurePredictor(config)
 
 
 class EMAModel:

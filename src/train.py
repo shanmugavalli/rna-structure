@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 
 from config import cfg
-from model import RNAStructurePredictor, EMAModel
+from model import build_model, EMAModel
 from dataset import create_dataloaders
 from losses import StructureLoss
 from utils import save_checkpoint, load_checkpoint, AverageMeter
@@ -49,6 +49,9 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)
         true_coords = batch['coords'].to(config.device)
+        residue_features = batch.get('residue_features', None)
+        if residue_features is not None:
+            residue_features = residue_features.to(config.device)
         coord_mask = batch.get('coord_mask', None)
         if coord_mask is not None:
             coord_mask = coord_mask.to(config.device)
@@ -69,7 +72,10 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
             continue
         
         # Forward pass (AMP disabled - using full float32)
-        pred_coords, all_coords = model(seq_tokens, msa_tokens)
+        if getattr(config, 'model_variant', 'full') == 'cpu_lite':
+            pred_coords, all_coords = model(seq_tokens, msa_tokens, residue_features=residue_features)
+        else:
+            pred_coords, all_coords = model(seq_tokens, msa_tokens)
         
         # Validate model outputs
         if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
@@ -154,12 +160,18 @@ def validate(model, val_loader, criterion, config):
         seq_tokens = batch['seq_tokens'].to(config.device)
         msa_tokens = batch['msa_tokens'].to(config.device)
         true_coords = batch['coords'].to(config.device)
+        residue_features = batch.get('residue_features', None)
+        if residue_features is not None:
+            residue_features = residue_features.to(config.device)
         coord_mask = batch.get('coord_mask', None)
         if coord_mask is not None:
             coord_mask = coord_mask.to(config.device)
         
         # Forward pass
-        pred_coords, all_coords = model(seq_tokens, msa_tokens)
+        if getattr(config, 'model_variant', 'full') == 'cpu_lite':
+            pred_coords, all_coords = model(seq_tokens, msa_tokens, residue_features=residue_features)
+        else:
+            pred_coords, all_coords = model(seq_tokens, msa_tokens)
         
         # Compute loss
         loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
@@ -207,7 +219,7 @@ def main():
     
     # Create model
     print("Creating model...")
-    model = RNAStructurePredictor(cfg).to(cfg.device)
+    model = build_model(cfg).to(cfg.device)
     
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -217,7 +229,10 @@ def main():
     ema = EMAModel(model, decay=cfg.ema_decay)
     
     # Loss function
-    criterion = StructureLoss(weights=cfg.loss_weights)
+    criterion = StructureLoss(
+        weights=cfg.loss_weights,
+        max_coord_abs=getattr(cfg, 'coord_abs_threshold', 2000.0),
+    )
     
     # Optimizer
     optimizer = AdamW(
@@ -228,11 +243,12 @@ def main():
     
     # Learning rate scheduler
     total_steps = max(1, (len(train_loader) // max(1, cfg.grad_accum_steps))) * cfg.epochs
+    pct_start = min(0.3, max(0.01, cfg.warmup_steps / total_steps))
     scheduler = OneCycleLR(
         optimizer,
         max_lr=cfg.learning_rate,
         total_steps=total_steps,
-        pct_start=cfg.warmup_steps / total_steps,
+        pct_start=pct_start,
         anneal_strategy='cos'
     )
     

@@ -7,9 +7,10 @@ import sys
 sys.path.append('src')
 
 from config import cfg
-from model import RNAStructurePredictor
+from model import build_model
 from modules.embeddings import tokenize_sequence, tokenize_msa
 from losses import StructureLoss
+from feature_engineering import build_residue_features
 
 def test_model():
     """Test model forward pass"""
@@ -40,7 +41,7 @@ def test_model():
     
     # Create model
     print("\n2. Creating model...")
-    model = RNAStructurePredictor(cfg)
+    model = build_model(cfg)
     
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -51,8 +52,12 @@ def test_model():
     print("\n3. Testing forward pass...")
     try:
         model.eval()
+        residue_features = torch.stack([build_residue_features(seq_tokens[i]) for i in range(batch_size)])
         with torch.no_grad():
-            coords, all_coords = model(seq_tokens, msa_tokens)
+            if getattr(cfg, 'model_variant', 'full') == 'cpu_lite':
+                coords, all_coords = model(seq_tokens, msa_tokens, residue_features=residue_features)
+            else:
+                coords, all_coords = model(seq_tokens, msa_tokens)
         
         print(f"   Output shape: {coords.shape}")
         print(f"   Expected: ({batch_size}, {seq_len}, 3)")
@@ -60,7 +65,6 @@ def test_model():
         print("   [OK] Forward pass successful")
         
         print(f"\n   Intermediate predictions: {len(all_coords)}")
-        print(f"   Expected: {cfg.structure_iterations + 1}")
         
     except Exception as e:
         print("   [ERROR] Forward pass failed: {e}")
@@ -91,7 +95,10 @@ def test_model():
     print("\n5. Testing backward pass...")
     try:
         model.train()
-        coords, all_coords = model(seq_tokens, msa_tokens)
+        if getattr(cfg, 'model_variant', 'full') == 'cpu_lite':
+            coords, all_coords = model(seq_tokens, msa_tokens, residue_features=residue_features)
+        else:
+            coords, all_coords = model(seq_tokens, msa_tokens)
         loss, _ = criterion(coords, true_coords, all_coords)
         loss.backward()
         

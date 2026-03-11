@@ -7,6 +7,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _safe_coord_mask(true_coords, coord_mask=None, max_coord_abs=2000.0, eps=1e-8):
+    """Build a robust residue-validity mask from provided mask + coordinate sanity checks."""
+    finite_mask = torch.isfinite(true_coords).all(dim=-1).float()
+    bounded_mask = (true_coords.abs().amax(dim=-1) <= float(max_coord_abs)).float()
+    safe_mask = finite_mask * bounded_mask
+    if coord_mask is not None:
+        safe_mask = safe_mask * coord_mask.float()
+    # Keep a minimum epsilon to avoid divide-by-zero in downstream reductions.
+    return torch.clamp(safe_mask, min=0.0, max=1.0)
+
+
+def _masked_center_and_scale(coords, coord_mask, eps=1e-8):
+    """Center and scale coordinates using only valid residues for stable loss magnitudes."""
+    mask3 = coord_mask.unsqueeze(-1)
+    valid_count = coord_mask.sum(dim=1, keepdim=True).clamp_min(eps)
+    center = (coords * mask3).sum(dim=1, keepdim=True) / valid_count.unsqueeze(-1)
+    centered = (coords - center) * mask3
+    # RMS radius as per-sample scale, clamped to avoid tiny/huge normalization factors.
+    sq = (centered ** 2).sum(dim=-1)
+    rms = torch.sqrt((sq * coord_mask).sum(dim=1, keepdim=True) / valid_count + eps)
+    scale = rms.clamp(min=1.0, max=100.0).unsqueeze(-1)
+    normalized = centered / scale
+    return normalized
+
+
 def fape_loss(pred_coords, true_coords, coord_mask=None, clamp_distance=10.0, eps=1e-8):
     """
     Frame Aligned Point Error (FAPE)
@@ -69,7 +94,7 @@ def fape_loss(pred_coords, true_coords, coord_mask=None, clamp_distance=10.0, ep
     return loss
 
 
-def coordinate_loss(pred_coords, true_coords, coord_mask=None):
+def coordinate_loss(pred_coords, true_coords, coord_mask=None, max_coord_abs=2000.0):
     """
     Simple coordinate MSE/L1 loss
     
@@ -80,16 +105,19 @@ def coordinate_loss(pred_coords, true_coords, coord_mask=None):
     Returns:
         loss: scalar
     """
-    if coord_mask is not None:
-        # Apply mask: expand to match coordinate dimensions
-        mask_expanded = coord_mask.unsqueeze(-1)  # (batch, seq_len, 1)
-        # Smooth L1 loss (Huber loss) with reduction='none'
-        loss_per_coord = F.smooth_l1_loss(pred_coords, true_coords, reduction='none')
-        # Apply mask and compute mean over valid positions
-        loss = (loss_per_coord * mask_expanded).sum() / (mask_expanded.sum() + 1e-8)
-    else:
-        # Smooth L1 loss (Huber loss)
-        loss = F.smooth_l1_loss(pred_coords, true_coords)
+    safe_mask = _safe_coord_mask(true_coords, coord_mask=coord_mask, max_coord_abs=max_coord_abs)
+
+    if safe_mask.sum() < 1:
+        return torch.tensor(0.0, device=pred_coords.device, dtype=pred_coords.dtype)
+
+    pred_norm = _masked_center_and_scale(pred_coords, safe_mask)
+    true_norm = _masked_center_and_scale(true_coords, safe_mask)
+
+    mask_expanded = safe_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+    loss_per_coord = F.smooth_l1_loss(pred_norm, true_norm, reduction='none')
+    # Denominator counts scalar coordinates (x,y,z), not only residues.
+    denom = (mask_expanded.sum() * pred_coords.shape[-1]).clamp_min(1e-8)
+    loss = (loss_per_coord * mask_expanded).sum() / denom
     return loss
 
 
@@ -201,7 +229,7 @@ def clash_penalty(coords, min_dist=3.0):
 class StructureLoss(nn.Module):
     """Combined loss for structure prediction"""
     
-    def __init__(self, weights=None):
+    def __init__(self, weights=None, max_coord_abs=2000.0):
         super().__init__()
         
         if weights is None:
@@ -212,6 +240,7 @@ class StructureLoss(nn.Module):
                 'clash': 0.3,
             }
         self.weights = weights
+        self.max_coord_abs = float(max_coord_abs)
     
     def forward(self, pred_coords, true_coords, all_coords=None, coord_mask=None):
         """
@@ -225,10 +254,16 @@ class StructureLoss(nn.Module):
             loss_dict: Dictionary of individual loss components
         """
         losses = {}
+        safe_mask = _safe_coord_mask(true_coords, coord_mask=coord_mask, max_coord_abs=self.max_coord_abs)
         
         # Main losses on final prediction
-        losses['fape'] = fape_loss(pred_coords, true_coords, coord_mask=coord_mask)
-        losses['coord'] = coordinate_loss(pred_coords, true_coords, coord_mask=coord_mask)
+        losses['fape'] = fape_loss(pred_coords, true_coords, coord_mask=safe_mask)
+        losses['coord'] = coordinate_loss(
+            pred_coords,
+            true_coords,
+            coord_mask=safe_mask,
+            max_coord_abs=self.max_coord_abs,
+        )
         losses['bond'] = bond_distance_loss(pred_coords)
         losses['clash'] = clash_penalty(pred_coords)
         
@@ -236,7 +271,7 @@ class StructureLoss(nn.Module):
         if all_coords is not None and len(all_coords) > 1:
             aux_loss = 0.0
             for coords in all_coords[:-1]:  # Exclude final (already counted)
-                aux_loss += fape_loss(coords, true_coords, coord_mask=coord_mask) * 0.2
+                aux_loss += fape_loss(coords, true_coords, coord_mask=safe_mask) * 0.2
             losses['auxiliary'] = aux_loss / (len(all_coords) - 1)
             self.weights['auxiliary'] = 0.1
         

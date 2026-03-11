@@ -21,7 +21,7 @@ def create_submission(predictions_path, test_sequences_path, output_path='submis
     
     # Load predictions
     print(f"Loading predictions from: {predictions_path}")
-    predictions = torch.load(predictions_path)
+    predictions = torch.load(predictions_path, weights_only=False)
     
     # Load test sequences
     print(f"Loading test sequences from: {test_sequences_path}")
@@ -41,6 +41,8 @@ def create_submission(predictions_path, test_sequences_path, output_path='submis
         # Get predictions: (5, seq_len, 3)
         coords_all = predictions[target_id]
         
+        pred_len = int(coords_all.shape[1])
+
         # Process each residue
         for res_idx, nucleotide in enumerate(sequence):
             # Create row ID
@@ -55,7 +57,10 @@ def create_submission(predictions_path, test_sequences_path, output_path='submis
             
             # Add coordinates for each of 5 predictions
             for pred_idx in range(5):
-                x, y, z = coords_all[pred_idx, res_idx, :]
+                if res_idx < pred_len:
+                    x, y, z = coords_all[pred_idx, res_idx, :]
+                else:
+                    x, y, z = 0.0, 0.0, 0.0
                 
                 # Clip coordinates to valid PDB range
                 x = np.clip(x, -999.999, 9999.999)
