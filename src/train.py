@@ -2,6 +2,7 @@
 Training script for RNA structure prediction
 """
 import os
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True,max_split_size_mb:128')
 import torch
 import torch.nn as nn
 import time

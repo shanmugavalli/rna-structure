@@ -13,8 +13,7 @@ Key settings:
 
 Expected performance: lower peak memory usage and stable training on Kaggle GPU.
 
-For full 33-hour training (epochs=80, msa_depth=6, max_msa_seqs=128, structure_iterations=3):
-Expected performance: TM-score 0.60-0.65 (+0.20-0.25 vs baseline)
+For full multi-day training (large GPUs only), increase depth/msa/length gradually.
 """
 import torch
 
@@ -29,19 +28,19 @@ class Config:
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
     embed_dim = 256
-    max_seq_length = 512 if runtime_mode == 'gpu' else 192  # GPU can handle longer sequences
-    max_msa_seqs = 128 if runtime_mode == 'gpu' else 1  # Full MSA depth on GPU
+    max_seq_length = 256 if runtime_mode == 'gpu' else 192  # Kaggle-safe default for 16GB GPUs
+    max_msa_seqs = 8 if runtime_mode == 'gpu' else 1  # Keep MSA small to avoid OOM
     
     # MSA Transformer
-    msa_depth = 6 if runtime_mode == 'gpu' else 1  # Full depth on GPU
+    msa_depth = 2 if runtime_mode == 'gpu' else 1  # Kaggle-safe depth
     n_heads = 8
     d_single = 256  # Single representation dimension
     d_pair = 128    # Pair representation dimension
     
     # Structure Module (Simplified - no full IPA)
-    structure_hidden = 384 if runtime_mode == 'gpu' else 192
-    structure_layers = 4 if runtime_mode == 'gpu' else 2  # More layers on GPU
-    structure_iterations = 4 if runtime_mode == 'gpu' else 1  # More refinement iterations
+    structure_hidden = 256 if runtime_mode == 'gpu' else 192
+    structure_layers = 2 if runtime_mode == 'gpu' else 2
+    structure_iterations = 2 if runtime_mode == 'gpu' else 1
 
     # Lite model settings (used when model_variant == 'cpu_lite')
     feature_dim = 9
@@ -49,13 +48,13 @@ class Config:
     lite_hidden_dim = 128
     
     # ============ Training ============
-    batch_size = 4 if runtime_mode == 'gpu' else 8  # GPU: smaller batch for larger model
+    batch_size = 1 if runtime_mode == 'gpu' else 8  # Required for Kaggle T4/P100 memory limits
     learning_rate = 1e-4 if runtime_mode == 'gpu' else 2e-4  # More conservative LR for full model
     weight_decay = 0.01
-    epochs = 80 if runtime_mode == 'gpu' else 20  # Full training on GPU
-    warmup_steps = 500 if runtime_mode == 'gpu' else 60
+    epochs = 20 if runtime_mode == 'gpu' else 20
+    warmup_steps = 120 if runtime_mode == 'gpu' else 60
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
-    grad_accum_steps = 2 if runtime_mode == 'gpu' else 1  # Accumulation for effective batch size
+    grad_accum_steps = 8 if runtime_mode == 'gpu' else 1  # Effective batch size 8 with batch_size=1
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
     use_gradient_checkpointing = True if runtime_mode == 'gpu' else False  # Save GPU memory
     
@@ -89,12 +88,12 @@ class Config:
     coord_abs_threshold = 2000.0
     min_valid_ratio = 0.70
     max_outlier_rate = 0.25
-    use_length_stratified_sampling = False if runtime_mode == 'gpu' else True  # GPU: use all data
-    length_bucket_boundaries = [64, 96, 128, 160, 192, 256, 320, 400, 512] if runtime_mode == 'gpu' else [64, 96, 128, 160, 192]
+    use_length_stratified_sampling = True if runtime_mode == 'gpu' else True
+    length_bucket_boundaries = [64, 96, 128, 160, 192, 224, 256] if runtime_mode == 'gpu' else [64, 96, 128, 160, 192]
     length_sampling_power = 1.0
-    length_bucket_strategy = 'fixed' if runtime_mode == 'gpu' else 'quantile'
-    length_num_buckets = 5
-    length_bucket_source = 'seq_len' if runtime_mode == 'gpu' else 'raw_seq_len'
+    length_bucket_strategy = 'quantile' if runtime_mode == 'gpu' else 'quantile'
+    length_num_buckets = 4
+    length_bucket_source = 'raw_seq_len' if runtime_mode == 'gpu' else 'raw_seq_len'
     generate_split_analysis = True
     analysis_dir = 'outputs/analysis'
     
@@ -105,7 +104,7 @@ class Config:
     noise_std = 0.1
     
     # Validation
-    val_frequency = 2 if runtime_mode == 'gpu' else 1  # Validate every 2 epochs on GPU
+    val_frequency = 1 if runtime_mode == 'gpu' else 1
     save_top_k = 5  # Save top K checkpoints
     max_train_minutes = 0  # No time limit (set externally if needed)
     
@@ -115,7 +114,7 @@ class Config:
     
     # ============ Device ============
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_workers = 4 if runtime_mode == 'gpu' else 0  # More workers for GPU
+    num_workers = 2 if runtime_mode == 'gpu' else 0
     pin_memory = True if runtime_mode == 'gpu' else False  # Pin memory on GPU
     
     # ============ Logging ============
