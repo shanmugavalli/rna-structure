@@ -28,8 +28,8 @@ class Config:
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
     embed_dim = 256
-    max_seq_length = 256 if runtime_mode == 'gpu' else 192  # Kaggle-safe default for 16GB GPUs
-    max_msa_seqs = 8 if runtime_mode == 'gpu' else 1  # Keep MSA small to avoid OOM
+    max_seq_length = 512 if runtime_mode == 'gpu' else 192  # Avoid truncating long RNAs on Kaggle GPU runs
+    max_msa_seqs = 6 if runtime_mode == 'gpu' else 1  # Trade some MSA depth for longer sequence coverage
     
     # MSA Transformer
     msa_depth = 2 if runtime_mode == 'gpu' else 1  # Kaggle-safe depth
@@ -89,7 +89,7 @@ class Config:
     min_valid_ratio = 0.70
     max_outlier_rate = 0.25
     use_length_stratified_sampling = True if runtime_mode == 'gpu' else True
-    length_bucket_boundaries = [64, 96, 128, 160, 192, 224, 256] if runtime_mode == 'gpu' else [64, 96, 128, 160, 192]
+    length_bucket_boundaries = [64, 96, 128, 160, 192, 256, 320, 384, 448, 512] if runtime_mode == 'gpu' else [64, 96, 128, 160, 192]
     length_sampling_power = 1.0
     length_bucket_strategy = 'quantile' if runtime_mode == 'gpu' else 'quantile'
     length_num_buckets = 4

@@ -16,29 +16,42 @@ from torch.utils.data import DataLoader
 
 
 def load_best_checkpoints(checkpoint_dir, top_k=3):
-    """Load top-k best checkpoints by validation loss"""
+    """Load top-k checkpoints, preferring validation TM-score when available."""
     # Find all checkpoints
     checkpoint_files = glob(os.path.join(checkpoint_dir, "checkpoint_epoch_*.pt"))
     
     if len(checkpoint_files) == 0:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
     
-    # Parse validation losses from filenames
-    checkpoints = []
+    tm_ranked = []
+    loss_ranked = []
     for path in checkpoint_files:
-        # Extract loss from filename: checkpoint_epoch_45_loss_0.1234.pt
+        # Prefer TM metadata stored inside checkpoint
+        try:
+            ckpt = torch.load(path, map_location='cpu')
+            if isinstance(ckpt, dict) and ('val_tm' in ckpt):
+                tm_ranked.append((float(ckpt['val_tm']), path))
+                continue
+        except Exception:
+            pass
+
+        # Fallback: parse validation loss from filename
         try:
             loss_str = path.split('_loss_')[-1].replace('.pt', '')
             loss = float(loss_str)
-            checkpoints.append((loss, path))
-        except:
+            loss_ranked.append((loss, path))
+        except Exception:
             continue
     
-    # Sort by loss and take top-k
-    checkpoints.sort(key=lambda x: x[0])
-    top_checkpoints = [path for _, path in checkpoints[:top_k]]
+    if tm_ranked:
+        tm_ranked.sort(key=lambda x: x[0], reverse=True)
+        top_checkpoints = [path for _, path in tm_ranked[:top_k]]
+        print(f"Found {len(tm_ranked)} TM-scored checkpoints")
+    else:
+        loss_ranked.sort(key=lambda x: x[0])
+        top_checkpoints = [path for _, path in loss_ranked[:top_k]]
+        print(f"Found {len(loss_ranked)} loss-scored checkpoints")
     
-    print(f"Found {len(checkpoints)} checkpoints")
     print(f"Using top {len(top_checkpoints)} checkpoints:")
     for i, path in enumerate(top_checkpoints, 1):
         print(f"  {i}. {os.path.basename(path)}")

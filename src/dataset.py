@@ -342,7 +342,11 @@ def _maybe_build_cache(config, split="train"):
         label_path = config.val_label_path
         max_samples = getattr(config, "cpu_val_max_samples", 0)
 
-    cache_path = os.path.join(cache_dir, f"{split}_cache.pt")
+    cache_path = os.path.join(
+        cache_dir,
+        f"{split}_cache_len{int(config.max_seq_length)}_msa{int(config.max_msa_seqs)}_"
+        f"corr{int(getattr(config, 'max_corruption_rate', 0.35) * 100)}.pt",
+    )
     if os.path.exists(cache_path):
         return cache_path
 

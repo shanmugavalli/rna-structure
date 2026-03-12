@@ -6,6 +6,7 @@ os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True,max_s
 import torch
 import torch.nn as nn
 import time
+import math
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 import numpy as np
@@ -18,6 +19,32 @@ from model import build_model, EMAModel
 from dataset import create_dataloaders
 from losses import StructureLoss
 from utils import save_checkpoint, load_checkpoint, AverageMeter
+def _kabsch_rmsd_np(pred, true):
+    """Kabsch-aligned RMSD for a single structure pair (numpy)."""
+    n = pred.shape[0]
+    if n < 3:
+        return float(np.linalg.norm(pred - true) / np.sqrt(max(n, 1)))
+
+    pred_c = pred - pred.mean(axis=0, keepdims=True)
+    true_c = true - true.mean(axis=0, keepdims=True)
+    h = pred_c.T @ true_c
+    u, _, vt = np.linalg.svd(h)
+    r = vt.T @ u.T
+    if np.linalg.det(r) < 0:
+        vt[-1, :] *= -1
+        r = vt.T @ u.T
+
+    pred_rot = pred_c @ r.T
+    return float(np.sqrt(np.mean((pred_rot - true_c) ** 2)))
+
+
+def _tm_score_np(pred, true):
+    """TM-score computed from aligned coordinates."""
+    n = pred.shape[0]
+    d0 = max(0.5, 1.24 * (n - 15) ** 0.33)
+    rmsd = _kabsch_rmsd_np(pred, true)
+    return float(np.mean(1.0 / (1.0 + (rmsd / d0) ** 2)))
+
 
 
 # Augmentation is now in dataset.py to be applied before batch collation
@@ -156,6 +183,7 @@ def validate(model, val_loader, criterion, config):
     losses = AverageMeter()
     fape_losses = AverageMeter()
     coord_losses = AverageMeter()
+    tm_scores = []
     
     for batch in tqdm(val_loader, desc="Validation"):
         seq_tokens = batch['seq_tokens'].to(config.device)
@@ -176,6 +204,20 @@ def validate(model, val_loader, criterion, config):
         
         # Compute loss
         loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
+
+        # Compute per-sample TM-score on valid residues only
+        pred_np = pred_coords.detach().cpu().numpy()
+        true_np = true_coords.detach().cpu().numpy()
+        if coord_mask is not None:
+            mask_np = coord_mask.detach().cpu().numpy() > 0.5
+        else:
+            mask_np = np.ones((pred_np.shape[0], pred_np.shape[1]), dtype=bool)
+
+        for si in range(pred_np.shape[0]):
+            valid = mask_np[si]
+            if valid.sum() < 3:
+                continue
+            tm_scores.append(_tm_score_np(pred_np[si][valid], true_np[si][valid]))
         
         # Update meters
         losses.update(loss.item())
@@ -191,7 +233,8 @@ def validate(model, val_loader, criterion, config):
     return {
         'val_loss': losses.avg,
         'val_fape': fape_losses.avg,
-        'val_coord': coord_losses.avg
+        'val_coord': coord_losses.avg,
+        'val_tm': float(np.mean(tm_scores)) if tm_scores else 0.0,
     }
 
 
@@ -243,7 +286,11 @@ def main():
     )
     
     # Learning rate scheduler
-    total_steps = max(1, (len(train_loader) // max(1, cfg.grad_accum_steps))) * cfg.epochs
+    # OneCycleLR expects the exact number of optimizer steps. With gradient
+    # accumulation we may still step on the final partial accumulation bucket,
+    # so use ceil instead of floor to avoid step-count overflow.
+    steps_per_epoch = max(1, math.ceil(len(train_loader) / max(1, cfg.grad_accum_steps)))
+    total_steps = steps_per_epoch * cfg.epochs
     pct_start = min(0.3, max(0.01, cfg.warmup_steps / total_steps))
     scheduler = OneCycleLR(
         optimizer,
@@ -255,9 +302,10 @@ def main():
     
     # Training loop
     best_val_loss = float('inf')
+    best_val_tm = float('-inf')
     best_checkpoints = []  # Track top-k checkpoints
     
-    history = {'train_loss': [], 'val_loss': [], 'val_fape': []}
+    history = {'train_loss': [], 'val_loss': [], 'val_fape': [], 'val_tm': []}
     
     for epoch in range(1, cfg.epochs + 1):
         if max_train_seconds > 0 and epoch > 1:
@@ -302,6 +350,7 @@ def main():
             print(f"\nTrain Loss: {train_metrics['train_loss']:.4f}")
             print(f"Val Loss: {val_metrics['val_loss']:.4f}")
             print(f"Val FAPE: {val_metrics['val_fape']:.4f}")
+            print(f"Val TM: {val_metrics['val_tm']:.4f}")
             
             # Save checkpoint
             val_loss = val_metrics['val_loss']
@@ -320,6 +369,7 @@ def main():
                     scheduler=scheduler.state_dict(),
                     epoch=epoch,
                     val_loss=val_loss,
+                    val_tm=val_metrics['val_tm'],
                     ema_state=ema.shadow
                 )
             
@@ -346,9 +396,25 @@ def main():
                     scheduler=scheduler.state_dict(),
                     epoch=epoch,
                     val_loss=val_loss,
+                    val_tm=val_metrics['val_tm'],
                     ema_state=ema.shadow
                 )
                 print(f"[OK] Saved best model (val_loss: {val_loss:.4f})")
+
+            if val_metrics['val_tm'] > best_val_tm:
+                best_val_tm = val_metrics['val_tm']
+                best_tm_path = os.path.join(cfg.checkpoint_dir, "best_model_tm.pt")
+                save_checkpoint(
+                    best_tm_path,
+                    model=model.state_dict(),
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                    epoch=epoch,
+                    val_loss=val_loss,
+                    val_tm=val_metrics['val_tm'],
+                    ema_state=ema.shadow
+                )
+                print(f"[OK] Saved best TM model (val_tm: {val_metrics['val_tm']:.4f})")
     
     # Save training history
     history_path = os.path.join(cfg.log_dir, 'training_history.json')
@@ -358,6 +424,7 @@ def main():
     print("\n" + "=" * 50)
     print("Training completed!")
     print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Best validation TM: {best_val_tm:.4f}")
     print(f"Top checkpoints saved in: {cfg.checkpoint_dir}")
     print("=" * 50)
 
