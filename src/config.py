@@ -17,30 +17,46 @@ For full multi-day training (large GPUs only), increase depth/msa/length gradual
 """
 import torch
 
+try:
+    import torch_xla.core.xla_model as xm
+except Exception:
+    xm = None
+
 class Config:
     """Model and training configuration"""
     
     # ============ Runtime Mode ============
-    runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'  # Force GPU if available for better performance
+    if xm is not None:
+        try:
+            _xla_device = xm.xla_device()
+            runtime_mode = 'tpu'
+        except Exception:
+            _xla_device = None
+            runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'
+    else:
+        _xla_device = None
+        runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'
     model_variant = 'full' if runtime_mode == 'gpu' else 'cpu_lite'
+    if runtime_mode == 'tpu':
+        model_variant = 'full'
 
     # ============ Model Architecture ============
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
     embed_dim = 256
-    max_seq_length = 512 if runtime_mode == 'gpu' else 192  # Avoid truncating long RNAs on Kaggle GPU runs
-    max_msa_seqs = 6 if runtime_mode == 'gpu' else 1  # Trade some MSA depth for longer sequence coverage
+    max_seq_length = 384 if runtime_mode == 'tpu' else (512 if runtime_mode == 'gpu' else 192)
+    max_msa_seqs = 12 if runtime_mode == 'tpu' else (6 if runtime_mode == 'gpu' else 1)
     
     # MSA Transformer
-    msa_depth = 2 if runtime_mode == 'gpu' else 1  # Kaggle-safe depth
+    msa_depth = 4 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)  # TPU can support deeper stacks
     n_heads = 8
     d_single = 256  # Single representation dimension
     d_pair = 128    # Pair representation dimension
     
     # Structure Module (Simplified - no full IPA)
-    structure_hidden = 256 if runtime_mode == 'gpu' else 192
-    structure_layers = 2 if runtime_mode == 'gpu' else 2
-    structure_iterations = 2 if runtime_mode == 'gpu' else 1
+    structure_hidden = 256 if runtime_mode in ('gpu', 'tpu') else 192
+    structure_layers = 2 if runtime_mode in ('gpu', 'tpu') else 2
+    structure_iterations = 3 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)
 
     # Lite model settings (used when model_variant == 'cpu_lite')
     feature_dim = 9
@@ -48,15 +64,15 @@ class Config:
     lite_hidden_dim = 128
     
     # ============ Training ============
-    batch_size = 1 if runtime_mode == 'gpu' else 8  # Required for Kaggle T4/P100 memory limits
-    learning_rate = 1e-4 if runtime_mode == 'gpu' else 2e-4  # More conservative LR for full model
+    batch_size = 4 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8)
+    learning_rate = 1.5e-4 if runtime_mode == 'tpu' else (1e-4 if runtime_mode == 'gpu' else 2e-4)
     weight_decay = 0.01
-    epochs = 20 if runtime_mode == 'gpu' else 20
-    warmup_steps = 120 if runtime_mode == 'gpu' else 60
+    epochs = 40 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20)
+    warmup_steps = 200 if runtime_mode == 'tpu' else (120 if runtime_mode == 'gpu' else 60)
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
-    grad_accum_steps = 8 if runtime_mode == 'gpu' else 1  # Effective batch size 8 with batch_size=1
+    grad_accum_steps = 1 if runtime_mode == 'tpu' else (8 if runtime_mode == 'gpu' else 1)
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
-    use_gradient_checkpointing = True if runtime_mode == 'gpu' else False  # Save GPU memory
+    use_gradient_checkpointing = True if runtime_mode in ('gpu', 'tpu') else False
     
     # Loss weights (will be adjusted by curriculum)
     loss_weights = {
@@ -88,8 +104,8 @@ class Config:
     coord_abs_threshold = 2000.0
     min_valid_ratio = 0.70
     max_outlier_rate = 0.25
-    use_length_stratified_sampling = True if runtime_mode == 'gpu' else True
-    length_bucket_boundaries = [64, 96, 128, 160, 192, 256, 320, 384, 448, 512] if runtime_mode == 'gpu' else [64, 96, 128, 160, 192]
+    use_length_stratified_sampling = True
+    length_bucket_boundaries = [64, 96, 128, 160, 192, 256, 320, 384, 448, 512] if runtime_mode in ('gpu', 'tpu') else [64, 96, 128, 160, 192]
     length_sampling_power = 1.0
     length_bucket_strategy = 'quantile' if runtime_mode == 'gpu' else 'quantile'
     length_num_buckets = 4
@@ -113,9 +129,9 @@ class Config:
     ensemble_method = 'checkpoint_diversity'  # or 'stochastic'
     
     # ============ Device ============
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    num_workers = 2 if runtime_mode == 'gpu' else 0
-    pin_memory = True if runtime_mode == 'gpu' else False  # Pin memory on GPU
+    device = _xla_device if runtime_mode == 'tpu' else ('cuda' if torch.cuda.is_available() else 'cpu')
+    num_workers = 0 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 0)
+    pin_memory = False if runtime_mode == 'tpu' else (True if runtime_mode == 'gpu' else False)
     
     # ============ Logging ============
     log_dir = 'outputs/logs'

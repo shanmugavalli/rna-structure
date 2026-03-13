@@ -19,6 +19,15 @@ from model import build_model, EMAModel
 from dataset import create_dataloaders
 from losses import StructureLoss
 from utils import save_checkpoint, load_checkpoint, AverageMeter
+
+try:
+    import torch_xla.core.xla_model as xm
+except Exception:
+    xm = None
+
+
+def _is_tpu_device(device):
+    return str(device).startswith('xla')
 def _kabsch_rmsd_np(pred, true):
     """Kabsch-aligned RMSD for a single structure pair (numpy)."""
     n = pred.shape[0]
@@ -67,6 +76,8 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
     accum_steps = max(1, config.grad_accum_steps)
     optimizer.zero_grad(set_to_none=True)
     
+    use_tpu = _is_tpu_device(config.device)
+
     for step, batch in enumerate(pbar):
         # Skip if batch is None (all samples were corrupted)
         if batch is None:
@@ -139,7 +150,11 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
                 optimizer.zero_grad(set_to_none=True)
             else:
                 # Optimizer step (no scaler.step needed - standard PyTorch)
-                optimizer.step()
+                if use_tpu and xm is not None:
+                    xm.optimizer_step(optimizer, barrier=False)
+                    xm.mark_step()
+                else:
+                    optimizer.step()
                 
                 # Scheduler step (AFTER optimizer step - correct order)
                 scheduler.step()
@@ -418,6 +433,7 @@ def main():
     
     # Save training history
     history_path = os.path.join(cfg.log_dir, 'training_history.json')
+    os.makedirs(cfg.log_dir, exist_ok=True)
     with open(history_path, 'w') as f:
         json.dump(history, f, indent=2)
     
