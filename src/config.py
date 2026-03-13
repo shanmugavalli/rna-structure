@@ -72,7 +72,9 @@ class Config:
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
     grad_accum_steps = 1 if runtime_mode == 'tpu' else (8 if runtime_mode == 'gpu' else 1)
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
-    use_gradient_checkpointing = True if runtime_mode in ('gpu', 'tpu') else False
+    # torch.utils.checkpoint currently breaks on Kaggle TPU/XLA in this setup
+    # (AttributeError: module 'torch' has no attribute 'xla').
+    use_gradient_checkpointing = True if runtime_mode == 'gpu' else False
     
     # Loss weights (will be adjusted by curriculum)
     loss_weights = {
