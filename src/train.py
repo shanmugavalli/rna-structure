@@ -138,12 +138,14 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
             # Clip gradients before optimizer step
             total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
             
-            # Check for NaN gradients
+            # On TPU/XLA, per-parameter isnan/isinf checks can trigger heavy graph
+            # materialization and memory pressure. Use only loss finiteness gate above.
             has_nan_grad = False
-            for param in model.parameters():
-                if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                    has_nan_grad = True
-                    break
+            if not use_tpu:
+                for param in model.parameters():
+                    if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                        has_nan_grad = True
+                        break
             
             if has_nan_grad:
                 print(f"[WARN] NaN/Inf gradients detected, skipping optimizer step")
@@ -152,7 +154,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
                 # Optimizer step (no scaler.step needed - standard PyTorch)
                 if use_tpu and xm is not None:
                     xm.optimizer_step(optimizer, barrier=False)
-                    xm.mark_step()
+                    xm.sync(wait=False)
                 else:
                     optimizer.step()
                 

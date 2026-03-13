@@ -41,22 +41,24 @@ class Config:
         model_variant = 'full'
 
     # ============ Model Architecture ============
+    # TPU-safe profile: keep settings conservative to avoid XLA HBM compile OOM
+    # on Kaggle v3 TPUs.
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
-    embed_dim = 256
-    max_seq_length = 384 if runtime_mode == 'tpu' else (512 if runtime_mode == 'gpu' else 192)
-    max_msa_seqs = 12 if runtime_mode == 'tpu' else (6 if runtime_mode == 'gpu' else 1)
+    embed_dim = 192 if runtime_mode == 'tpu' else 256
+    max_seq_length = 256 if runtime_mode == 'tpu' else (512 if runtime_mode == 'gpu' else 192)
+    max_msa_seqs = 6 if runtime_mode == 'tpu' else (6 if runtime_mode == 'gpu' else 1)
     
     # MSA Transformer
-    msa_depth = 4 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)  # TPU can support deeper stacks
-    n_heads = 8
-    d_single = 256  # Single representation dimension
-    d_pair = 128    # Pair representation dimension
+    msa_depth = 2 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)
+    n_heads = 4 if runtime_mode == 'tpu' else 8
+    d_single = 192 if runtime_mode == 'tpu' else 256  # Single representation dimension
+    d_pair = 96 if runtime_mode == 'tpu' else 128    # Pair representation dimension
     
     # Structure Module (Simplified - no full IPA)
-    structure_hidden = 256 if runtime_mode in ('gpu', 'tpu') else 192
+    structure_hidden = 192 if runtime_mode == 'tpu' else (256 if runtime_mode == 'gpu' else 192)
     structure_layers = 2 if runtime_mode in ('gpu', 'tpu') else 2
-    structure_iterations = 3 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)
+    structure_iterations = 2 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1)
 
     # Lite model settings (used when model_variant == 'cpu_lite')
     feature_dim = 9
@@ -64,13 +66,13 @@ class Config:
     lite_hidden_dim = 128
     
     # ============ Training ============
-    batch_size = 4 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8)
+    batch_size = 1 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8)
     learning_rate = 1.5e-4 if runtime_mode == 'tpu' else (1e-4 if runtime_mode == 'gpu' else 2e-4)
     weight_decay = 0.01
     epochs = 40 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20)
     warmup_steps = 200 if runtime_mode == 'tpu' else (120 if runtime_mode == 'gpu' else 60)
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
-    grad_accum_steps = 1 if runtime_mode == 'tpu' else (8 if runtime_mode == 'gpu' else 1)
+    grad_accum_steps = 4 if runtime_mode == 'tpu' else (8 if runtime_mode == 'gpu' else 1)
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
     # torch.utils.checkpoint currently breaks on Kaggle TPU/XLA in this setup
     # (AttributeError: module 'torch' has no attribute 'xla').
