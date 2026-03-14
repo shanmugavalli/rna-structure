@@ -103,7 +103,8 @@ class RNAStructurePredictor(nn.Module):
             n_iterations=config.structure_iterations,
             n_heads=config.n_heads,
             dropout=config.dropout,
-            use_checkpoint=config.use_gradient_checkpointing
+            use_checkpoint=config.use_gradient_checkpointing,
+            input_dim=config.d_single,
         )
         
     def forward(self, seq_tokens, msa_tokens):

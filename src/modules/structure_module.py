@@ -149,13 +149,14 @@ class StructureModule(nn.Module):
     Simplified version for Option B (no full IPA)
     """
     
-    def __init__(self, d_single=384, d_pair=128, n_iterations=3, n_heads=8, dropout=0.1, use_checkpoint=False):
+    def __init__(self, d_single=384, d_pair=128, n_iterations=3, n_heads=8, dropout=0.1, use_checkpoint=False, input_dim=None):
         super().__init__()
         self.n_iterations = n_iterations
         self.use_checkpoint = use_checkpoint
+        self.input_dim = d_single if input_dim is None else input_dim
         
         # Project to structure module hidden dimension
-        self.input_proj = nn.Linear(256, d_single)  # From MSA output to structure dim
+        self.input_proj = nn.Linear(self.input_dim, d_single)  # From MSA output to structure dim
         
         # Iterative structure update blocks
         self.update_blocks = nn.ModuleList([
@@ -173,8 +174,8 @@ class StructureModule(nn.Module):
     def forward(self, single, pair):
         """
         Args:
-            single: (batch, seq_len, 256) - from MSA transformer
-            pair: (batch, seq_len, seq_len, 128) - from MSA transformer
+            single: (batch, seq_len, input_dim) - from MSA transformer
+            pair: (batch, seq_len, seq_len, d_pair) - from MSA transformer
         Returns:
             coords: (batch, seq_len, 3) - predicted C1' coordinates
             all_coords: List of coordinates from each iteration
