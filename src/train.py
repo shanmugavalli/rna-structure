@@ -22,8 +22,10 @@ from utils import save_checkpoint, load_checkpoint, AverageMeter
 
 try:
     import torch_xla.core.xla_model as xm
+    import torch_xla as _torch_xla
 except Exception:
     xm = None
+    _torch_xla = None
 
 
 def _is_tpu_device(device):
@@ -154,7 +156,12 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
                 # Optimizer step (no scaler.step needed - standard PyTorch)
                 if use_tpu and xm is not None:
                     xm.optimizer_step(optimizer, barrier=False)
-                    xm.sync(wait=False)
+                    # Use non-deprecated torch_xla.sync() if available,
+                    # fall back to xm.mark_step() for older torch_xla versions.
+                    if _torch_xla is not None and hasattr(_torch_xla, 'sync'):
+                        _torch_xla.sync()
+                    else:
+                        xm.mark_step()
                 else:
                     optimizer.step()
                 

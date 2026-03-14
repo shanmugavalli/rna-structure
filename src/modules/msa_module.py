@@ -198,6 +198,7 @@ class MSATransformer(nn.Module):
     def __init__(self, d_msa=256, d_pair=128, n_blocks=6, n_heads=8, dropout=0.1, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
+        self.d_pair = d_pair
         
         # Stack of MSA transformer blocks
         self.blocks = nn.ModuleList([
@@ -224,8 +225,7 @@ class MSATransformer(nn.Module):
         
         # Initialize pair representation if not provided
         if pair_init is None:
-            d_pair = 128
-            pair = torch.zeros(batch, seq_len, seq_len, d_pair, 
+            pair = torch.zeros(batch, seq_len, seq_len, self.d_pair,
                              device=msa_emb.device, dtype=msa_emb.dtype)
         else:
             pair = pair_init
