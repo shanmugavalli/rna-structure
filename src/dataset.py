@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
+from functools import partial
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from data_processing import (
@@ -231,7 +232,15 @@ def _quantile_boundaries(lengths, num_buckets):
     return [b for b in bounds if b < max_len]
 
 
-def _build_length_stratified_sampler(dataset, boundaries, sampling_power=1.0, strategy="fixed", num_buckets=5, length_source="seq_len"):
+def _build_length_stratified_sampler(
+    dataset,
+    boundaries,
+    sampling_power=1.0,
+    strategy="fixed",
+    num_buckets=5,
+    length_source="seq_len",
+    num_samples=None,
+):
     """Create weighted sampler to upsample underrepresented length buckets."""
     lengths = dataset.get_sequence_lengths(source=length_source) if hasattr(dataset, "get_sequence_lengths") else []
     if not lengths:
@@ -252,9 +261,11 @@ def _build_length_stratified_sampler(dataset, boundaries, sampling_power=1.0, st
         bucket_count = max(1, counts[bucket_id])
         weights.append((1.0 / float(bucket_count)) ** float(sampling_power))
 
+    target_num_samples = len(weights) if (num_samples is None or int(num_samples) <= 0) else int(num_samples)
+
     sampler = WeightedRandomSampler(
         weights=torch.tensor(weights, dtype=torch.double),
-        num_samples=len(weights),
+        num_samples=target_num_samples,
         replacement=True,
     )
 
@@ -264,17 +275,19 @@ def _build_length_stratified_sampler(dataset, boundaries, sampling_power=1.0, st
         "boundaries": boundaries,
         "counts": counts.tolist(),
         "total": len(lengths),
+        "num_samples": target_num_samples,
     }
     return sampler, stats
 
 
-def collate_fn(batch):
+def collate_fn(batch, fixed_len=None):
     """Collate variable-length samples and skip invalid rows."""
     batch = [item for item in batch if item is not None]
     if len(batch) == 0:
         return None
 
-    max_len = max(item["seq_len"] for item in batch)
+    dynamic_max_len = max(item["seq_len"] for item in batch)
+    max_len = int(fixed_len) if fixed_len is not None else dynamic_max_len
 
     seq_tokens = []
     msa_tokens = []
@@ -411,6 +424,7 @@ def create_dataloaders(config):
         strategy = getattr(config, "length_bucket_strategy", "fixed")
         num_buckets = getattr(config, "length_num_buckets", 5)
         length_source = getattr(config, "length_bucket_source", "seq_len")
+        samples_per_epoch = getattr(config, "train_num_samples_per_epoch", 0)
         train_sampler, stats = _build_length_stratified_sampler(
             train_dataset,
             boundaries,
@@ -418,12 +432,14 @@ def create_dataloaders(config):
             strategy=strategy,
             num_buckets=num_buckets,
             length_source=length_source,
+            num_samples=samples_per_epoch,
         )
         if stats:
             print(
                 f"[INFO] Length stratified sampling enabled. "
                 f"source={stats['length_source']} strategy={stats['strategy']} "
-                f"boundaries={stats['boundaries']} counts={stats['counts']} total={stats['total']}"
+                f"boundaries={stats['boundaries']} counts={stats['counts']} total={stats['total']} "
+                f"samples_per_epoch={stats['num_samples']}"
             )
             if getattr(config, "generate_split_analysis", False):
                 try:
@@ -448,23 +464,42 @@ def create_dataloaders(config):
                 except Exception as exc:
                     print(f"[WARN] Could not generate split analysis plots: {exc}")
 
+    collate = collate_fn
+    if str(getattr(config, "device", "")).startswith("xla"):
+        # TPU/XLA performs best with static shapes to avoid recompilation.
+        collate = partial(collate_fn, fixed_len=int(config.max_seq_length))
+
+    train_loader_kwargs = {
+        "batch_size": config.batch_size,
+        "shuffle": (train_sampler is None),
+        "sampler": train_sampler,
+        "num_workers": config.num_workers,
+        "pin_memory": config.pin_memory,
+        "collate_fn": collate,
+    }
+    if int(config.num_workers) > 0:
+        train_loader_kwargs["persistent_workers"] = True
+        train_loader_kwargs["prefetch_factor"] = 2
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=config.num_workers,
-        pin_memory=config.pin_memory,
-        collate_fn=collate_fn,
+        **train_loader_kwargs,
     )
+
+    val_loader_kwargs = {
+        "batch_size": config.batch_size,
+        "shuffle": False,
+        "num_workers": config.num_workers,
+        "pin_memory": config.pin_memory,
+        "collate_fn": collate,
+    }
+    if int(config.num_workers) > 0:
+        val_loader_kwargs["persistent_workers"] = True
+        val_loader_kwargs["prefetch_factor"] = 2
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=config.pin_memory,
-        collate_fn=collate_fn,
+        **val_loader_kwargs,
     )
 
     return train_loader, val_loader

@@ -22,6 +22,48 @@ try:
 except Exception:
     xm = None
 
+
+def _detect_tpu_core_count():
+    """Best-effort TPU core detection across torch-xla versions."""
+    if xm is None:
+        return 0
+
+    # Newer torch-xla runtime API
+    try:
+        import torch_xla.runtime as xr  # type: ignore
+
+        n = int(xr.global_runtime_device_count())
+        if n > 0:
+            return n
+    except Exception:
+        pass
+
+    # Legacy API commonly available in Kaggle TPU runtimes
+    try:
+        n = int(xm.xrt_world_size())
+        if n > 0:
+            return n
+    except Exception:
+        pass
+
+    # Fallback: count reported XLA devices
+    try:
+        devices = xm.get_xla_supported_devices(devkind="TPU")
+        if devices:
+            return len(devices)
+    except Exception:
+        pass
+
+    try:
+        devices = xm.get_xla_supported_devices()
+        if devices:
+            return len(devices)
+    except Exception:
+        pass
+
+    # If TPU runtime is present but not queryable, assume single visible core.
+    return 1
+
 class Config:
     """Model and training configuration"""
     
@@ -39,6 +81,7 @@ class Config:
     model_variant = 'full' if runtime_mode == 'gpu' else 'cpu_lite'
     if runtime_mode == 'tpu':
         model_variant = 'full'
+    tpu_core_count = _detect_tpu_core_count() if runtime_mode == 'tpu' else 0
 
     # ============ Model Architecture ============
     # TPU-safe profile: keep settings conservative to avoid XLA HBM compile OOM
@@ -69,10 +112,31 @@ class Config:
     batch_size = 1 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8)
     learning_rate = 1.5e-4 if runtime_mode == 'tpu' else (1e-4 if runtime_mode == 'gpu' else 2e-4)
     weight_decay = 0.01
-    epochs = 40 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20)
+    epochs = 60 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20)
     warmup_steps = 200 if runtime_mode == 'tpu' else (120 if runtime_mode == 'gpu' else 60)
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
-    grad_accum_steps = 4 if runtime_mode == 'tpu' else (8 if runtime_mode == 'gpu' else 1)
+    if runtime_mode == 'tpu':
+        # Keep global effective batch size in a safe range while adapting to core count.
+        if tpu_core_count <= 1:
+            grad_accum_steps = 8
+        elif tpu_core_count <= 4:
+            grad_accum_steps = 4
+        else:
+            grad_accum_steps = 2
+    else:
+        grad_accum_steps = 8 if runtime_mode == 'gpu' else 1
+    enable_runtime_tensor_checks = False if runtime_mode == 'tpu' else True
+    if runtime_mode == 'tpu':
+        # Prefer more epochs with fewer steps each for TPU runtime stability.
+        if tpu_core_count <= 1:
+            train_num_samples_per_epoch = 256
+        elif tpu_core_count <= 4:
+            train_num_samples_per_epoch = 512
+        else:
+            train_num_samples_per_epoch = 1024
+    else:
+        train_num_samples_per_epoch = 0
+    max_steps_per_epoch = int(train_num_samples_per_epoch) if runtime_mode == 'tpu' else 0
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
     # torch.utils.checkpoint currently breaks on Kaggle TPU/XLA in this setup
     # (AttributeError: module 'torch' has no attribute 'xla').
@@ -124,7 +188,7 @@ class Config:
     noise_std = 0.1
     
     # Validation
-    val_frequency = 1 if runtime_mode == 'gpu' else 1
+    val_frequency = 3 if runtime_mode == 'tpu' else 1
     save_top_k = 5  # Save top K checkpoints
     max_train_minutes = 0  # No time limit (set externally if needed)
     
@@ -134,8 +198,9 @@ class Config:
     
     # ============ Device ============
     device = _xla_device if runtime_mode == 'tpu' else ('cuda' if torch.cuda.is_available() else 'cpu')
-    num_workers = 0 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 0)
+    num_workers = max(2, min(8, int(tpu_core_count))) if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 0)
     pin_memory = False if runtime_mode == 'tpu' else (True if runtime_mode == 'gpu' else False)
+    effective_batch_size = batch_size * max(1, int(tpu_core_count)) * grad_accum_steps
     
     # ============ Logging ============
     log_dir = 'outputs/logs'

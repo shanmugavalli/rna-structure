@@ -76,11 +76,18 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
     # Note: GradScaler removed - AMP disabled in config
     accum_steps = max(1, config.grad_accum_steps)
+    max_steps_per_epoch = int(getattr(config, 'max_steps_per_epoch', 0) or 0)
     optimizer.zero_grad(set_to_none=True)
     
     use_tpu = _is_tpu_device(config.device)
+    use_runtime_tensor_checks = bool(getattr(config, 'enable_runtime_tensor_checks', True)) and not use_tpu
 
     for step, batch in enumerate(pbar):
+        if max_steps_per_epoch > 0 and step >= max_steps_per_epoch:
+            if step == max_steps_per_epoch:
+                print(f"[INFO] Reached max_steps_per_epoch={max_steps_per_epoch}, ending epoch early.")
+            break
+
         # Skip if batch is None (all samples were corrupted)
         if batch is None:
             print(f"[WARN] Batch {step}: all samples corrupted, skipping")
@@ -97,17 +104,18 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         if coord_mask is not None:
             coord_mask = coord_mask.to(config.device)
         
-        # Validate inputs for NaN/Inf
-        if torch.isnan(seq_tokens).any() or torch.isnan(msa_tokens).any() or torch.isnan(true_coords).any():
-            print(f"[WARN] Batch {step}: input contains NaN, skipping")
-            continue
-        if torch.isinf(seq_tokens).any() or torch.isinf(msa_tokens).any() or torch.isinf(true_coords).any():
-            print(f"[WARN] Batch {step}: input contains Inf, skipping")
-            continue
+        # Validate inputs for NaN/Inf (disabled on TPU for performance)
+        if use_runtime_tensor_checks:
+            if torch.isnan(seq_tokens).any() or torch.isnan(msa_tokens).any() or torch.isnan(true_coords).any():
+                print(f"[WARN] Batch {step}: input contains NaN, skipping")
+                continue
+            if torch.isinf(seq_tokens).any() or torch.isinf(msa_tokens).any() or torch.isinf(true_coords).any():
+                print(f"[WARN] Batch {step}: input contains Inf, skipping")
+                continue
         
         # Augmentation already applied in dataset pipeline
         # Additional safeguard: verify augmented coords are still valid
-        if torch.isnan(true_coords).any() or torch.isinf(true_coords).any():
+        if use_runtime_tensor_checks and (torch.isnan(true_coords).any() or torch.isinf(true_coords).any()):
             print(f"[WARN] Batch {step}: augmented coords contain NaN/Inf, skipping")
             optimizer.zero_grad(set_to_none=True)
             continue
@@ -118,8 +126,8 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         else:
             pred_coords, all_coords = model(seq_tokens, msa_tokens)
         
-        # Validate model outputs
-        if torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any():
+        # Validate model outputs (disabled on TPU for performance)
+        if use_runtime_tensor_checks and (torch.isnan(pred_coords).any() or torch.isinf(pred_coords).any()):
             print(f"[WARN] Batch {step}: model output contains NaN/Inf, skipping")
             optimizer.zero_grad(set_to_none=True)
             continue
@@ -181,7 +189,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, epoch, con
         
         # Free memory explicitly
         del loss, loss_dict, pred_coords, all_coords
-        if (step + 1) % accum_steps == 0:
+        if (step + 1) % accum_steps == 0 and torch.cuda.is_available() and str(config.device).startswith('cuda'):
             torch.cuda.empty_cache()
         
         # Update progress bar
@@ -208,6 +216,7 @@ def validate(model, val_loader, criterion, config):
     fape_losses = AverageMeter()
     coord_losses = AverageMeter()
     tm_scores = []
+    use_tpu = _is_tpu_device(config.device)
     
     for batch in tqdm(val_loader, desc="Validation"):
         seq_tokens = batch['seq_tokens'].to(config.device)
@@ -229,19 +238,21 @@ def validate(model, val_loader, criterion, config):
         # Compute loss
         loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
 
-        # Compute per-sample TM-score on valid residues only
-        pred_np = pred_coords.detach().cpu().numpy()
-        true_np = true_coords.detach().cpu().numpy()
-        if coord_mask is not None:
-            mask_np = coord_mask.detach().cpu().numpy() > 0.5
-        else:
-            mask_np = np.ones((pred_np.shape[0], pred_np.shape[1]), dtype=bool)
+        # Compute per-sample TM-score on valid residues only.
+        # Skip this expensive CPU roundtrip on TPU during training loops.
+        if not use_tpu:
+            pred_np = pred_coords.detach().cpu().numpy()
+            true_np = true_coords.detach().cpu().numpy()
+            if coord_mask is not None:
+                mask_np = coord_mask.detach().cpu().numpy() > 0.5
+            else:
+                mask_np = np.ones((pred_np.shape[0], pred_np.shape[1]), dtype=bool)
 
-        for si in range(pred_np.shape[0]):
-            valid = mask_np[si]
-            if valid.sum() < 3:
-                continue
-            tm_scores.append(_tm_score_np(pred_np[si][valid], true_np[si][valid]))
+            for si in range(pred_np.shape[0]):
+                valid = mask_np[si]
+                if valid.sum() < 3:
+                    continue
+                tm_scores.append(_tm_score_np(pred_np[si][valid], true_np[si][valid]))
         
         # Update meters
         losses.update(loss.item())
@@ -252,7 +263,8 @@ def validate(model, val_loader, criterion, config):
         del loss, loss_dict, pred_coords, all_coords, seq_tokens, msa_tokens, true_coords
     
     # Clear cache after validation
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available() and str(config.device).startswith('cuda'):
+        torch.cuda.empty_cache()
     
     return {
         'val_loss': losses.avg,
@@ -270,7 +282,13 @@ def main():
     print("RNA 3D Structure Prediction - Option B Training")
     print("=" * 50)
     print(f"Device: {cfg.device}")
+    if _is_tpu_device(cfg.device):
+        print(f"TPU cores detected: {getattr(cfg, 'tpu_core_count', 1)}")
     print(f"Batch size: {cfg.batch_size}")
+    print(f"Grad accum steps: {cfg.grad_accum_steps}")
+    print(f"Effective batch size: {getattr(cfg, 'effective_batch_size', cfg.batch_size * cfg.grad_accum_steps)}")
+    if int(getattr(cfg, 'max_steps_per_epoch', 0) or 0) > 0:
+        print(f"Max train steps/epoch: {cfg.max_steps_per_epoch}")
     print(f"Learning rate: {cfg.learning_rate}")
     print(f"Epochs: {cfg.epochs}")
     print("=" * 50)
