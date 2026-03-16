@@ -30,14 +30,14 @@ except Exception:
 
 def _is_tpu_device(device):
     return str(device).startswith('xla')
-def _kabsch_rmsd_np(pred, true):
-    """Kabsch-aligned RMSD for a single structure pair (numpy)."""
+def _kabsch_align_np(pred, true):
+    """Return Kabsch-aligned coordinates (pred_aligned, true_centered)."""
     n = pred.shape[0]
-    if n < 3:
-        return float(np.linalg.norm(pred - true) / np.sqrt(max(n, 1)))
-
     pred_c = pred - pred.mean(axis=0, keepdims=True)
     true_c = true - true.mean(axis=0, keepdims=True)
+    if n < 3:
+        return pred_c, true_c
+
     h = pred_c.T @ true_c
     u, _, vt = np.linalg.svd(h)
     r = vt.T @ u.T
@@ -46,15 +46,19 @@ def _kabsch_rmsd_np(pred, true):
         r = vt.T @ u.T
 
     pred_rot = pred_c @ r.T
-    return float(np.sqrt(np.mean((pred_rot - true_c) ** 2)))
+    return pred_rot, true_c
 
 
 def _tm_score_np(pred, true):
     """TM-score computed from aligned coordinates."""
     n = pred.shape[0]
-    d0 = max(0.5, 1.24 * (n - 15) ** 0.33)
-    rmsd = _kabsch_rmsd_np(pred, true)
-    return float(np.mean(1.0 / (1.0 + (rmsd / d0) ** 2)))
+    if n == 0:
+        return 0.0
+    n_eff = max(16, int(n))
+    d0 = max(0.5, 1.24 * (n_eff - 15) ** 0.33)
+    pred_aligned, true_centered = _kabsch_align_np(pred, true)
+    distances = np.linalg.norm(pred_aligned - true_centered, axis=1)
+    return float(np.mean(1.0 / (1.0 + (distances / d0) ** 2)))
 
 
 
@@ -217,6 +221,9 @@ def validate(model, val_loader, criterion, config):
     coord_losses = AverageMeter()
     tm_scores = []
     use_tpu = _is_tpu_device(config.device)
+    compute_tm = (not use_tpu) or bool(getattr(config, 'val_tm_on_tpu', False))
+    tm_max_samples = int(getattr(config, 'val_tm_max_samples', 0) or 0)
+    tm_processed = 0
     
     for batch in tqdm(val_loader, desc="Validation"):
         seq_tokens = batch['seq_tokens'].to(config.device)
@@ -239,8 +246,8 @@ def validate(model, val_loader, criterion, config):
         loss, loss_dict = criterion(pred_coords, true_coords, all_coords, coord_mask=coord_mask)
 
         # Compute per-sample TM-score on valid residues only.
-        # Skip this expensive CPU roundtrip on TPU during training loops.
-        if not use_tpu:
+        # On TPU this can be capped for speed via val_tm_max_samples.
+        if compute_tm and (tm_max_samples <= 0 or tm_processed < tm_max_samples):
             pred_np = pred_coords.detach().cpu().numpy()
             true_np = true_coords.detach().cpu().numpy()
             if coord_mask is not None:
@@ -249,10 +256,13 @@ def validate(model, val_loader, criterion, config):
                 mask_np = np.ones((pred_np.shape[0], pred_np.shape[1]), dtype=bool)
 
             for si in range(pred_np.shape[0]):
+                if tm_max_samples > 0 and tm_processed >= tm_max_samples:
+                    break
                 valid = mask_np[si]
                 if valid.sum() < 3:
                     continue
                 tm_scores.append(_tm_score_np(pred_np[si][valid], true_np[si][valid]))
+                tm_processed += 1
         
         # Update meters
         losses.update(loss.item())

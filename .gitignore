@@ -1,0 +1,29 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Build and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local outputs and artifacts
+outputs/
+data/processed/
+data/raw/
+*.pt
+
+# Local prediction/submission artifacts
+submission*.csv
+test_output.txt

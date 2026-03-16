@@ -1,0 +1,10 @@
+# Kaggle-compatible dependencies for RNA-STRUCTURE
+# Keep this minimal to avoid conflicts with Kaggle preinstalled packages.
+
+# Core runtime deps used by this project
+biopython>=1.81
+einops>=0.6.1
+tqdm>=4.65.0
+
+# Optional logging utility (usually already available)
+tensorboard>=2.13.0

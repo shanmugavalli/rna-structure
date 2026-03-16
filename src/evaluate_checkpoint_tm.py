@@ -15,14 +15,14 @@ from dataset import create_dataloaders
 from model import build_model
 
 
-def kabsch_rmsd(pred, true):
-    """Kabsch-aligned RMSD for one structure pair."""
+def kabsch_align(pred, true):
+    """Return Kabsch-aligned coordinates (pred_aligned, true_centered)."""
     n = pred.shape[0]
-    if n < 3:
-        return float(np.linalg.norm(pred - true) / np.sqrt(max(n, 1)))
-
     pred_c = pred - pred.mean(axis=0, keepdims=True)
     true_c = true - true.mean(axis=0, keepdims=True)
+
+    if n < 3:
+        return pred_c, true_c
 
     h = pred_c.T @ true_c
     u, _, vt = np.linalg.svd(h)
@@ -33,15 +33,19 @@ def kabsch_rmsd(pred, true):
         r = vt.T @ u.T
 
     pred_rot = pred_c @ r.T
-    return float(np.sqrt(np.mean((pred_rot - true_c) ** 2)))
+    return pred_rot, true_c
 
 
 def tm_score(pred, true):
     """TM-score from aligned coordinates."""
     n = len(pred)
-    d0 = max(0.5, 1.24 * (n - 15) ** 0.33)
-    rmsd = kabsch_rmsd(pred, true)
-    return float(np.mean(1.0 / (1.0 + (rmsd / d0) ** 2)))
+    if n == 0:
+        return 0.0
+    n_eff = max(16, int(n))
+    d0 = max(0.5, 1.24 * (n_eff - 15) ** 0.33)
+    pred_aligned, true_centered = kabsch_align(pred, true)
+    distances = np.linalg.norm(pred_aligned - true_centered, axis=1)
+    return float(np.mean(1.0 / (1.0 + (distances / d0) ** 2)))
 
 
 @torch.no_grad()
@@ -49,7 +53,7 @@ def evaluate(checkpoint_path, max_samples=0):
     _, val_loader = create_dataloaders(cfg)
 
     model = build_model(cfg).to(cfg.device)
-    checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
     if isinstance(checkpoint, dict) and "model" in checkpoint:
         model.load_state_dict(checkpoint["model"])

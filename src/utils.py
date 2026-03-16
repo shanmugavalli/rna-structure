@@ -5,6 +5,19 @@ import os
 import torch
 
 
+def _to_cpu_serializable(obj):
+    """Recursively move tensor containers to CPU for portable checkpoints."""
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _to_cpu_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_cpu_serializable(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_cpu_serializable(v) for v in obj)
+    return obj
+
+
 class AverageMeter:
     """Computes and stores the average and current value"""
     
@@ -27,7 +40,8 @@ class AverageMeter:
 def save_checkpoint(path, **kwargs):
     """Save model checkpoint"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(kwargs, path)
+    payload = _to_cpu_serializable(kwargs)
+    torch.save(payload, path)
     print(f"Checkpoint saved: {path}")
 
 

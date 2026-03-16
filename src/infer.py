@@ -65,7 +65,7 @@ def load_models(checkpoint_paths, config):
     
     for path in checkpoint_paths:
         model = build_model(config).to(config.device)
-        checkpoint = torch.load(path, map_location=config.device)
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
         
         # Load model state
         if 'model' in checkpoint:
