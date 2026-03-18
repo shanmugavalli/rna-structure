@@ -14,6 +14,16 @@ Usage (invoked from kaggle_train.ipynb cell 7):
 """
 import os
 import sys
+
+# ── Prevent double XLA-client initialization ──────────────────────────────────
+# config.py calls xm.xla_device() at class-definition time when RNA_RUNTIME=tpu.
+# That initialises the XLA computation client in THIS process.  When xmp.spawn
+# later queries available chips it calls InitializeComputationClient() again
+# → SIGABRT ("can only be called once").  Setting RNA_NO_XLA_INIT=1 before
+# importing config tells config.py to skip those calls; each spawned worker
+# (fresh process) calls xm.xla_device() itself inside _train_fn.
+os.environ['RNA_NO_XLA_INIT'] = '1'
+
 import math
 import time
 import json

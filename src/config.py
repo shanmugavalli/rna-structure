@@ -110,6 +110,11 @@ class Config:
     debug_use_train_as_val = _env_bool('RNA_DEBUG_USE_TRAIN_AS_VAL', False)
     
     # ============ Runtime Mode ============
+    # RNA_NO_XLA_INIT=1: skip xm.xla_device() / _detect_tpu_core_count() in the
+    # parent process of train_tpu.py.  Workers call xm.xla_device() themselves
+    # inside _train_fn after xmp.spawn has given each process its own chip.
+    _no_xla_init = _env_bool('RNA_NO_XLA_INIT', False)
+
     if force_runtime == 'cpu':
         _xla_device = None
         runtime_mode = 'cpu'
@@ -117,30 +122,37 @@ class Config:
         _xla_device = None
         runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'
     elif force_runtime == 'tpu':
-        if xm is not None:
+        if xm is not None and not _no_xla_init:
             try:
                 _xla_device = xm.xla_device()
                 runtime_mode = 'tpu'
             except Exception:
                 _xla_device = None
                 runtime_mode = 'cpu'
+        elif xm is not None:  # _no_xla_init=True: defer device to worker
+            _xla_device = None
+            runtime_mode = 'tpu'
         else:
             _xla_device = None
             runtime_mode = 'cpu'
-    elif xm is not None:
+    elif xm is not None and not _no_xla_init:
         try:
             _xla_device = xm.xla_device()
             runtime_mode = 'tpu'
         except Exception:
             _xla_device = None
             runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'
+    elif xm is not None:  # auto-detect TPU but _no_xla_init=True
+        _xla_device = None
+        runtime_mode = 'tpu'
     else:
         _xla_device = None
         runtime_mode = 'gpu' if torch.cuda.is_available() else 'cpu'
     model_variant = 'full' if runtime_mode in ('gpu', 'tpu') else 'cpu_lite'
     if force_model_variant in {'full', 'cpu_lite'}:
         model_variant = force_model_variant
-    tpu_core_count = _detect_tpu_core_count() if runtime_mode == 'tpu' else 0
+    # Skip device-count detection in parent process (would also init XLA client)
+    tpu_core_count = (_detect_tpu_core_count() if not _no_xla_init else 8) if runtime_mode == 'tpu' else 0
 
     # ============ Model Architecture ============
     # TPU v5e-8 profile: 8 chips × 16 GB HBM each → larger batch + longer seqs.
