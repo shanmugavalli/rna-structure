@@ -372,20 +372,19 @@ def main():
     print(f"[TPU] train cache: {train_cache}")
     print(f"[TPU] val   cache: {val_cache}")
 
-    # Detect number of TPU chips available
-    try:
-        import torch_xla.runtime as xr
-        nprocs = int(xr.global_runtime_device_count())
-    except Exception:
-        nprocs = 0
+    # Use TPU_NUM_DEVICES (set automatically by Kaggle's TPU runtime).
+    # Do NOT call xm.xrt_world_size() / xr.global_runtime_device_count() here —
+    # they initialize the XLA computation client in the parent, which would then
+    # be inherited by forked workers (even with spawn this avoids confusion).
+    # Default 8 covers TPU v5e-8 and v3-8.
+    nprocs = int(os.environ.get('TPU_NUM_DEVICES', 8))
 
-    if nprocs <= 0:
-        # Fallback: honour env var, default to 8 for TPU v5e-8
-        nprocs = int(os.environ.get('TPU_NUM_DEVICES', 8))
-
-    print(f"[TPU] Spawning {nprocs} XMP workers ...")
+    print(f"[TPU] Spawning {nprocs} XMP workers (start_method=spawn) ...")
     flags = {'train_cache': train_cache, 'val_cache': val_cache}
-    xmp.spawn(_train_fn, nprocs=nprocs, args=(flags,), start_method='fork')
+    # MUST use start_method='spawn' — 'fork' inherits the already-initialized
+    # XLA computation client from the parent (config.py calls xm.xla_device()
+    # at import time), causing a fatal "can only be called once" crash.
+    xmp.spawn(_train_fn, nprocs=nprocs, args=(flags,), start_method='spawn')
 
 
 if __name__ == '__main__':
