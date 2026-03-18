@@ -377,14 +377,15 @@ def main():
     # they initialize the XLA computation client in the parent, which would then
     # be inherited by forked workers (even with spawn this avoids confusion).
     # Default 8 covers TPU v5e-8 and v3-8.
-    nprocs = int(os.environ.get('TPU_NUM_DEVICES', 8))
-
-    print(f"[TPU] Spawning {nprocs} XMP workers (start_method=spawn) ...")
+    nprocs_env = int(os.environ.get('TPU_NUM_DEVICES', 8))
+    print(f"[TPU] Spawning XMP workers (start_method=spawn, nprocs=None → auto-detect, env hint={nprocs_env}) ...")
     flags = {'train_cache': train_cache, 'val_cache': val_cache}
+    # nprocs=None: newer torch_xla (>=2.x) auto-discovers all available chips.
+    # Passing an explicit int raises ValueError in torch_xla 2.8+.
     # MUST use start_method='spawn' — 'fork' inherits the already-initialized
     # XLA computation client from the parent (config.py calls xm.xla_device()
     # at import time), causing a fatal "can only be called once" crash.
-    xmp.spawn(_train_fn, nprocs=nprocs, args=(flags,), start_method='spawn')
+    xmp.spawn(_train_fn, nprocs=None, args=(flags,), start_method='spawn')
 
 
 if __name__ == '__main__':
