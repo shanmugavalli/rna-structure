@@ -143,24 +143,24 @@ class Config:
     tpu_core_count = _detect_tpu_core_count() if runtime_mode == 'tpu' else 0
 
     # ============ Model Architecture ============
-    # TPU-safe profile: keep settings conservative to avoid XLA HBM compile OOM
-    # on Kaggle v3 TPUs.
+    # TPU v5e-8 profile: 8 chips × 16 GB HBM each → larger batch + longer seqs.
+    # GPU profile kept conservative for single-T4 Kaggle runs.
     # Embeddings
     vocab_size = 5  # A, C, G, U, + padding token
-    embed_dim = _env_int('RNA_EMBED_DIM', 192 if runtime_mode == 'tpu' else 256)
-    max_seq_length = _env_int('RNA_MAX_SEQ_LENGTH', 256 if runtime_mode == 'tpu' else (512 if runtime_mode == 'gpu' else 192))
-    max_msa_seqs = _env_int('RNA_MAX_MSA_SEQS', 6 if runtime_mode in ('gpu', 'tpu') else 1)
+    embed_dim = _env_int('RNA_EMBED_DIM', 256 if runtime_mode == 'tpu' else 256)
+    max_seq_length = _env_int('RNA_MAX_SEQ_LENGTH', 384 if runtime_mode == 'tpu' else (512 if runtime_mode == 'gpu' else 192))
+    max_msa_seqs = _env_int('RNA_MAX_MSA_SEQS', 8 if runtime_mode == 'tpu' else (6 if runtime_mode == 'gpu' else 1))
     
     # MSA Transformer
-    msa_depth = _env_int('RNA_MSA_DEPTH', 2 if runtime_mode in ('gpu', 'tpu') else 1)
-    n_heads = _env_int('RNA_N_HEADS', 4 if runtime_mode == 'tpu' else 8)
-    d_single = _env_int('RNA_D_SINGLE', 192 if runtime_mode == 'tpu' else 256)  # Single representation dimension
-    d_pair = _env_int('RNA_D_PAIR', 96 if runtime_mode == 'tpu' else 128)    # Pair representation dimension
+    msa_depth = _env_int('RNA_MSA_DEPTH', 4 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1))
+    n_heads = _env_int('RNA_N_HEADS', 8 if runtime_mode == 'tpu' else 8)
+    d_single = _env_int('RNA_D_SINGLE', 256 if runtime_mode == 'tpu' else 256)  # Single representation dimension
+    d_pair = _env_int('RNA_D_PAIR', 128 if runtime_mode == 'tpu' else 128)    # Pair representation dimension
     
     # Structure Module (Simplified - no full IPA)
-    structure_hidden = _env_int('RNA_STRUCTURE_HIDDEN', 192 if runtime_mode == 'tpu' else (256 if runtime_mode == 'gpu' else 192))
+    structure_hidden = _env_int('RNA_STRUCTURE_HIDDEN', 256 if runtime_mode == 'tpu' else (256 if runtime_mode == 'gpu' else 192))
     structure_layers = _env_int('RNA_STRUCTURE_LAYERS', 2)
-    structure_iterations = _env_int('RNA_STRUCTURE_ITERATIONS', 2 if runtime_mode in ('gpu', 'tpu') else 1)
+    structure_iterations = _env_int('RNA_STRUCTURE_ITERATIONS', 3 if runtime_mode == 'tpu' else (2 if runtime_mode == 'gpu' else 1))
 
     # Lite model settings (used when model_variant == 'cpu_lite')
     feature_dim = 9
@@ -168,34 +168,29 @@ class Config:
     lite_hidden_dim = 128
     
     # ============ Training ============
-    batch_size = _env_int('RNA_BATCH_SIZE', 1 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8))
-    learning_rate = _env_float('RNA_LR', 1.5e-4 if runtime_mode == 'tpu' else (1e-4 if runtime_mode == 'gpu' else 2e-4))
+    # TPU v5e-8: 4 samples/chip × 8 chips = 32 global; GPU: 1 sample/T4 (memory bound)
+    batch_size = _env_int('RNA_BATCH_SIZE', 4 if runtime_mode == 'tpu' else (1 if runtime_mode == 'gpu' else 8))
+    learning_rate = _env_float('RNA_LR', 3e-4 if runtime_mode == 'tpu' else (1e-4 if runtime_mode == 'gpu' else 2e-4))
     weight_decay = 0.01
-    epochs = _env_int('RNA_EPOCHS', 60 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20))
-    warmup_steps = 200 if runtime_mode == 'tpu' else (120 if runtime_mode == 'gpu' else 60)
+    epochs = _env_int('RNA_EPOCHS', 50 if runtime_mode == 'tpu' else (20 if runtime_mode == 'gpu' else 20))
+    warmup_steps = 300 if runtime_mode == 'tpu' else (120 if runtime_mode == 'gpu' else 60)
     grad_clip = 0.5  # Reduced from 1.0 for better gradient stability
     if runtime_mode == 'tpu':
-        # Keep global effective batch size in a safe range while adapting to core count.
+        # TPU v5e-8: effective batch = batch_size(4) × 8 chips × accum(2) = 64
+        # No need for large accum since XMP already multiplies by world_size.
         if tpu_core_count <= 1:
-            grad_accum_steps = 8
-        elif tpu_core_count <= 4:
             grad_accum_steps = 4
-        else:
+        elif tpu_core_count <= 4:
             grad_accum_steps = 2
+        else:
+            grad_accum_steps = 1   # 8 chips × batch 4 = 32 already sufficient
     else:
         grad_accum_steps = 8 if runtime_mode == 'gpu' else 1
     enable_runtime_tensor_checks = False if runtime_mode == 'tpu' else True
-    if runtime_mode == 'tpu':
-        # Prefer more epochs with fewer steps each for TPU runtime stability.
-        if tpu_core_count <= 1:
-            train_num_samples_per_epoch = 256
-        elif tpu_core_count <= 4:
-            train_num_samples_per_epoch = 512
-        else:
-            train_num_samples_per_epoch = 1024
-    else:
-        train_num_samples_per_epoch = 0
-    max_steps_per_epoch = int(train_num_samples_per_epoch) if runtime_mode == 'tpu' else 0
+    # train_tpu.py manages steps per epoch via DistributedSampler; disable the
+    # legacy max_steps_per_epoch cap used by the single-core train.py path.
+    train_num_samples_per_epoch = 0
+    max_steps_per_epoch = 0
     use_amp = False  # DISABLED: float16 AMP causes NaN accumulation with attention ops
     # torch.utils.checkpoint currently breaks on Kaggle TPU/XLA in this setup
     # (AttributeError: module 'torch' has no attribute 'xla').
