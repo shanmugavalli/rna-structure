@@ -39,7 +39,6 @@ from torch.utils.data.distributed import DistributedSampler
 
 import torch_xla
 import torch_xla.core.xla_model as xm
-import torch_xla.distributed.xla_multiprocessing as xmp
 import torch_xla.distributed.parallel_loader as pl
 
 # ── path setup ────────────────────────────────────────────────────────────────
@@ -382,20 +381,14 @@ def main():
     print(f"[TPU] train cache: {train_cache}")
     print(f"[TPU] val   cache: {val_cache}")
 
-    # Use TPU_NUM_DEVICES (set automatically by Kaggle's TPU runtime).
-    # Do NOT call xm.xrt_world_size() / xr.global_runtime_device_count() here —
-    # they initialize the XLA computation client in the parent, which would then
-    # be inherited by forked workers (even with spawn this avoids confusion).
-    # Default 8 covers TPU v5e-8 and v3-8.
-    nprocs_env = int(os.environ.get('TPU_NUM_DEVICES', 8))
-    print(f"[TPU] Spawning XMP workers (start_method=spawn, nprocs=None → auto-detect, env hint={nprocs_env}) ...")
     flags = {'train_cache': train_cache, 'val_cache': val_cache}
-    # nprocs=None: newer torch_xla (>=2.x) auto-discovers all available chips.
-    # Passing an explicit int raises ValueError in torch_xla 2.8+.
-    # MUST use start_method='spawn' — 'fork' inherits the already-initialized
-    # XLA computation client from the parent (config.py calls xm.xla_device()
-    # at import time), causing a fatal "can only be called once" crash.
-    xmp.spawn(_train_fn, nprocs=None, args=(flags,), start_method='spawn')
+    # Use torch_xla.launch (introduced in torch_xla 2.4, correct for PJRT/TPU v5e).
+    # Unlike xmp.spawn, torch_xla.launch does NOT call GetComputationClient() in
+    # the parent process, so there is no double-init SIGABRT even though
+    # 'import torch_xla' already initialised the computation client above.
+    # Each spawned worker starts fresh, imports torch_xla, and gets its own chip.
+    print("[TPU] Launching workers with torch_xla.launch ...")
+    torch_xla.launch(_train_fn, args=(flags,))
 
 
 if __name__ == '__main__':
