@@ -104,11 +104,28 @@ def _train_fn(rank: int, flags: dict):
 
     torch.manual_seed(42 + rank)
 
-    # ── Datasets (load from pre-built cache) ──────────────────────────────────
-    # Caches were already built by the master process before spawning; every
-    # worker just memory-maps them from disk (torch.load map_location='cpu').
-    train_cache = flags['train_cache']
-    val_cache   = flags['val_cache']
+    # ── Datasets (worker init first, then coordinated cache build) ────────────
+    # Rank-0 builds caches after TPU worker initialization; other workers wait
+    # at rendezvous and then load the same cache files.
+    train_cache = flags.get('train_cache')
+    val_cache = flags.get('val_cache')
+
+    if not train_cache or not val_cache:
+        if is_master:
+            print("[TPU] Building / verifying dataset caches (master only) ...")
+            train_cache = _maybe_build_cache(cfg, split='train')
+            val_cache = _maybe_build_cache(cfg, split='val')
+            print(f"[TPU] train cache: {train_cache}")
+            print(f"[TPU] val   cache: {val_cache}")
+
+        # Wait until rank-0 finishes cache generation.
+        xm.rendezvous('cache_ready')
+
+        # Non-master workers resolve cache paths after barrier. If cache files
+        # already exist this returns immediately without preprocessing.
+        if not is_master:
+            train_cache = _maybe_build_cache(cfg, split='train')
+            val_cache = _maybe_build_cache(cfg, split='val')
 
     train_dataset = RNACachedDataset(train_cache, augment=True)
     val_dataset   = RNACachedDataset(val_cache,   augment=False)
@@ -372,16 +389,8 @@ def _save_fp32_ckpt(model, ckpt_dir, fname, epoch, val_loss, val_tm):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # ── Pre-build dataset caches (once, before spawning worker processes) ────
-    # This avoids each of the 8 workers trying to build the same cache
-    # simultaneously and racing on disk writes.
-    print("[TPU] Pre-building / verifying dataset caches ...")
-    train_cache = _maybe_build_cache(cfg, split='train')
-    val_cache   = _maybe_build_cache(cfg, split='val')
-    print(f"[TPU] train cache: {train_cache}")
-    print(f"[TPU] val   cache: {val_cache}")
+    flags = {'train_cache': None, 'val_cache': None}
 
-    flags = {'train_cache': train_cache, 'val_cache': val_cache}
     # Use torch_xla.launch (introduced in torch_xla 2.4, correct for PJRT/TPU v5e).
     # Unlike xmp.spawn, torch_xla.launch does NOT call GetComputationClient() in
     # the parent process, so there is no double-init SIGABRT even though
@@ -392,17 +401,20 @@ def main():
         torch_xla.launch(_train_fn, args=(flags,))
     except RuntimeError as exc:
         msg = str(exc)
-        # Kaggle occasionally reports 8 TPU chips but exposes only one worker
-        # address to PJRT. Fall back to a single-process TPU run instead of
-        # failing the whole training job.
+        # Enforce multiprocess-only TPU execution.
         address_mismatch = (
             'slice_builder_worker_addresses' in msg
             and 'Expected 8 worker addresses, got 1' in msg
         )
-        if address_mismatch:
-            print("[TPU][WARN] Multi-process TPU launch failed due to worker address mismatch.")
-            print("[TPU][WARN] Falling back to single-process TPU training on xla:0.")
-            _train_fn(0, flags)
+        vfio_busy = ('/dev/vfio/' in msg and 'Device or resource busy' in msg)
+        xla_reinit = ('InitializeComputationClient() can only be called once' in msg)
+
+        if address_mismatch or vfio_busy or xla_reinit:
+            raise RuntimeError(
+                "TPU multiprocess initialization failed and single-process fallback is disabled. "
+                "Restart the Kaggle runtime and re-run TPU launch. "
+                f"Original error: {msg}"
+            ) from exc
         else:
             raise
 
