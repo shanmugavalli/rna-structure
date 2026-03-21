@@ -388,7 +388,23 @@ def main():
     # 'import torch_xla' already initialised the computation client above.
     # Each spawned worker starts fresh, imports torch_xla, and gets its own chip.
     print("[TPU] Launching workers with torch_xla.launch ...")
-    torch_xla.launch(_train_fn, args=(flags,))
+    try:
+        torch_xla.launch(_train_fn, args=(flags,))
+    except RuntimeError as exc:
+        msg = str(exc)
+        # Kaggle occasionally reports 8 TPU chips but exposes only one worker
+        # address to PJRT. Fall back to a single-process TPU run instead of
+        # failing the whole training job.
+        address_mismatch = (
+            'slice_builder_worker_addresses' in msg
+            and 'Expected 8 worker addresses, got 1' in msg
+        )
+        if address_mismatch:
+            print("[TPU][WARN] Multi-process TPU launch failed due to worker address mismatch.")
+            print("[TPU][WARN] Falling back to single-process TPU training on xla:0.")
+            _train_fn(0, flags)
+        else:
+            raise
 
 
 if __name__ == '__main__':
