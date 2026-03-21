@@ -292,6 +292,9 @@ def _train_fn(rank: int, flags: dict):
             model.eval()
             tm_scores  = []
             val_losses = []
+            tm_valid_samples = 0
+            compute_tm = bool(getattr(cfg, 'val_tm_on_tpu', True))
+            tm_max_samples = int(getattr(cfg, 'val_tm_max_samples', 0) or 0)
 
             val_para = pl.MpDeviceLoader(val_loader_raw, device)
             with torch.no_grad():
@@ -317,21 +320,29 @@ def _train_fn(rank: int, flags: dict):
                     _sync()
                     val_losses.append(vloss.item())
 
-                    # TM-score on CPU
-                    pred_np = vp_f32.detach().cpu().numpy()
-                    true_np = vc_f32.detach().cpu().numpy()
-                    if vmask is not None:
-                        mask_np = (vmask.detach().cpu().numpy() > 0.5)
-                    else:
-                        mask_np = np.ones(pred_np.shape[:2], dtype=bool)
+                    # TM-score on CPU (optional + sample cap for TPU speed)
+                    if compute_tm and (tm_max_samples <= 0 or tm_valid_samples < tm_max_samples):
+                        pred_np = vp_f32.detach().cpu().numpy()
+                        true_np = vc_f32.detach().cpu().numpy()
+                        if vmask is not None:
+                            mask_np = (vmask.detach().cpu().numpy() > 0.5)
+                        else:
+                            mask_np = np.ones(pred_np.shape[:2], dtype=bool)
 
-                    for si in range(pred_np.shape[0]):
-                        valid = mask_np[si]
-                        if valid.sum() >= 3:
-                            tm_scores.append(_tm_score(pred_np[si][valid], true_np[si][valid]))
+                        for si in range(pred_np.shape[0]):
+                            if tm_max_samples > 0 and tm_valid_samples >= tm_max_samples:
+                                break
+                            valid = mask_np[si]
+                            if valid.sum() >= 3:
+                                tm_scores.append(_tm_score(pred_np[si][valid], true_np[si][valid]))
+                                tm_valid_samples += 1
 
             val_tm   = float(np.mean(tm_scores))   if tm_scores   else 0.0
             val_loss = float(np.mean(val_losses))  if val_losses  else 0.0
+            if compute_tm and tm_valid_samples == 0:
+                print("[WARN] Val TM computed on 0 samples (valid residues < 3).")
+            elif compute_tm:
+                print(f"[TPU] Val TM samples: {tm_valid_samples}")
 
         # ── Wait for all chips before next epoch ──────────────────────────────
         xm.rendezvous('end_epoch')

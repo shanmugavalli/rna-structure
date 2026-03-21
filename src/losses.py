@@ -146,7 +146,7 @@ def rmsd_loss(pred_coords, true_coords, eps=1e-8):
     return rmsd
 
 
-def bond_distance_loss(coords, target_dist=6.0, tolerance=1.0):
+def bond_distance_loss(coords, coord_mask=None, target_dist=6.0, tolerance=1.0):
     """
     Regularize consecutive residue distances (C1'-C1' backbone)
     Typical RNA C1'-C1' distance is ~5-7 Angstroms
@@ -171,7 +171,15 @@ def bond_distance_loss(coords, target_dist=6.0, tolerance=1.0):
     
     # Penalize deviations outside tolerance
     error = F.relu(torch.abs(dist - target_dist) - tolerance)
-    loss = error.mean()
+
+    if coord_mask is not None:
+        pair_mask = (coord_mask[:, 1:] * coord_mask[:, :-1]).float()
+        valid_count = pair_mask.sum()
+        if valid_count < 1.0:
+            return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
+        loss = (error * pair_mask).sum() / valid_count
+    else:
+        loss = error.mean()
     
     if not torch.isfinite(loss):
         print("[WARN] Bond loss is non-finite, returning 0")
@@ -180,7 +188,7 @@ def bond_distance_loss(coords, target_dist=6.0, tolerance=1.0):
     return loss
 
 
-def clash_penalty(coords, min_dist=3.0):
+def clash_penalty(coords, coord_mask=None, min_dist=3.0):
     """
     Penalize atoms that are too close (clash)
     
@@ -207,6 +215,10 @@ def clash_penalty(coords, min_dist=3.0):
     mask = torch.ones_like(dist, dtype=torch.bool)
     for i in range(seq_len):
         mask[:, i, max(0, i-1):min(seq_len, i+2)] = False
+
+    if coord_mask is not None:
+        valid_pair_mask = (coord_mask.unsqueeze(2) * coord_mask.unsqueeze(1)) > 0.5
+        mask = mask & valid_pair_mask
     
     # Penalize distances below threshold
     clash = F.relu(min_dist - dist)
@@ -264,8 +276,8 @@ class StructureLoss(nn.Module):
             coord_mask=safe_mask,
             max_coord_abs=self.max_coord_abs,
         )
-        losses['bond'] = bond_distance_loss(pred_coords)
-        losses['clash'] = clash_penalty(pred_coords)
+        losses['bond'] = bond_distance_loss(pred_coords, coord_mask=safe_mask)
+        losses['clash'] = clash_penalty(pred_coords, coord_mask=safe_mask)
         
         # Optional: Auxiliary loss on intermediate predictions
         if all_coords is not None and len(all_coords) > 1:
